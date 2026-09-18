@@ -401,10 +401,11 @@ export const MAX_SESSION_LOAD_BYTES = 1024 * 1024 * 1024;
  * this never materializes the whole file as a single JS string, so sessions
  * past Node's ~512 MiB string cap still open. Lines exclude the newline; the
  * decoder carries multi-byte characters across chunk boundaries.
+ * Return false from onLine to stop reading once the desired entry is found.
  */
 export function forEachFileLineSync(
   filePath: string,
-  onLine: (line: string, offset: number, length: number) => void,
+  onLine: (line: string, offset: number, length: number) => boolean | void,
 ): void {
   const fd = openSync(filePath, "r");
   try {
@@ -425,7 +426,7 @@ export function forEachFileLineSync(
         length += end - start;
         if (end < bytesRead) {
           fragments.push(decoder.end());
-          onLine(fragments.join(""), offset, length);
+          if (onLine(fragments.join(""), offset, length) === false) return;
           fragments.length = 0;
           offset += length + 1;
           length = 0;
@@ -882,9 +883,9 @@ function readTextSlices(filePath: string, prefixBytes: number, suffixBytes: numb
 }
 
 /**
- * Scan a single session file into an OmpSessionInfo using only a 4 KiB prefix
- * window (plus a 32 KiB tail window when `withStatus` is set). Faithful port
- * of omp's scanSessionFile — messageCount is a prefix-derived lower bound.
+ * Scan a session using a 4 KiB prefix and optional 32 KiB tail. Untitled
+ * sessions whose prelude fills the prefix are scanned until user text is found.
+ * messageCount is a lower bound, not the total number of messages in the file.
  */
 export function scanSessionInfo(filePath: string, withStatus = true): OmpSessionInfo | undefined {
   try {
@@ -913,8 +914,26 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       }
     }
 
+    if (!header.title && !firstMessage && size > SESSION_LIST_PREFIX_BYTES) {
+      // RPC sessions may persist a large initialization notice before the user
+      // message. Prefer that user's text over any assistant/developer fallback.
+      forEachFileLineSync(filePath, (line) => {
+        let entry: unknown;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) return;
+        if (entry.message.role !== "user") return;
+        const text = extractTextFromContent(entry.message.content);
+        if (!text.trim()) return;
+        firstMessage = text;
+        return false;
+      });
+    }
+    const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content), firstMessage ? 1 : 0);
     firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
-    const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
     return {
       path: filePath,
       id: header.id,
