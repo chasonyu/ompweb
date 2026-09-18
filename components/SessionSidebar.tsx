@@ -31,7 +31,7 @@ import {
   type WorktreeState,
 } from "./SessionSidebar-helpers";
 import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton } from "./SessionSidebar-chrome";
-import { ProjectRow, ProjectWorktreeSwitcher } from "./SessionSidebar-rows";
+import { ProjectRow, ProjectWorktreeSwitcher, SessionItem } from "./SessionSidebar-rows";
 
 /** Deadline for one /api/sessions fetch. A wedged-but-listening server never
  * answers; without this the initial spinner would pend forever. */
@@ -113,6 +113,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [wtConfirmRemove, setWtConfirmRemove] = useState<string | null>(null);
   const wtToggleRef = useRef<HTMLButtonElement>(null);
   const wtNewInputRef = useRef<HTMLInputElement>(null);
+  const [pinnedSessionIds, setPinnedSessionIds] = useState<Set<string>>(() => new Set());
+  const pinRequestRef = useRef(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [runningSessionCwds, setRunningSessionCwds] = useState<Record<string, string>>({});
@@ -157,8 +159,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const etag = res.headers.get("ETag");
       if (etag) sessionsEtagRef.current = etag;
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }> };
+      const data = await res.json() as { sessions: SessionInfo[]; pinnedSessionIds?: string[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }> };
       setAllSessions(data.sessions);
+      setPinnedSessionIds(new Set(data.pinnedSessionIds ?? []));
       if (data.runningSessions) {
         for (const rs of data.runningSessions) {
           if (rs.id && rs.cwd) knownRunningCwdsRef.current.set(rs.id, rs.cwd);
@@ -198,6 +201,25 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       if (showLoading) setLoading(false);
     }
   }, [t]);
+
+  const handleTogglePin = useCallback(async (id: string) => {
+    if (pinRequestRef.current) return;
+    pinRequestRef.current = true;
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/pin`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned: !pinnedSessionIds.has(id) }),
+      });
+      if (!response.ok) throw new Error("Pin request failed");
+      await loadSessions();
+    } catch {
+      toast.error(t("sessionSidebar.pinFailed"));
+    } finally {
+      pinRequestRef.current = false;
+    }
+  }, [pinnedSessionIds, loadSessions, t]);
+
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -684,6 +706,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
     return entries;
   }, [sortedProjects, sessionsByProject, runningOnly, deferredSearchQuery, runningSessionIds]);
+
+  const pinnedSessions = useMemo(() => {
+    const matching = new Map(visibleProjectEntries.flatMap(({ sessions }) => sessions).map((session) => [session.id, session]));
+    return [...pinnedSessionIds].flatMap((id) => matching.has(id) ? [matching.get(id)!] : []);
+  }, [visibleProjectEntries, pinnedSessionIds]);
 
   const treesByProject = useMemo(() => {
     const m = new Map<string, ReturnType<typeof buildSessionTree>>();
@@ -1376,6 +1403,22 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             </div>
           )}
 
+          {pinnedSessions.length > 0 && (
+            <section aria-label={t("sessionSidebar.pinned")} style={{ marginBottom: 12 }}>
+              <div style={{ padding: "6px 10px", fontSize: 11, color: "var(--text-muted)" }}>{t("sessionSidebar.pinned")}</div>
+              {pinnedSessions.map((session) => (
+                <SessionItem key={session.id} session={session} isPinned
+                  isSelected={session.id === selectedSessionId}
+                  isRunning={runningSessionIds.has(session.id)}
+                  isUnread={unreadSessionIds.has(session.id)}
+                  relativeTimeNow={relativeTimeNow}
+                  hasChildren={allSessions.some((child) => child.parentSessionId === session.id)}
+                  onClick={() => handleSelectSessionFromList(session)}
+                  onTogglePin={handleTogglePin} onRenamed={loadSessions} onDeleted={handleSessionDeleted} />
+              ))}
+            </section>
+          )}
+
           {visibleProjectEntries.map(({ project, sessions }) => {
             const tree = treesByProject.get(project.path) ?? buildSessionTree(sessions);
             // Sessions group under a project through the case-folded comparable
@@ -1413,6 +1456,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 isDragTarget={draggedProjectPath !== null && draggedProjectPath !== project.path}
                 removeBusy={removeProjectPath === project.path}
                 onSelectSession={handleSelectSessionFromList}
+                pinnedSessionIds={pinnedSessionIds}
+                onTogglePin={handleTogglePin}
                 onRenamed={loadSessions}
                 onSessionDeleted={handleSessionDeleted}
                 activeWorktreeSwitcher={isActive ? activeProjectSwitcher : null}

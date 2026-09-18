@@ -4,7 +4,7 @@ import { memo, useCallback, useRef, useState, type Dispatch, type ReactNode, typ
 import type { AgentMessage, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Check, ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin, PinOff, Plus, Trash2 } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
@@ -58,6 +58,8 @@ interface ProjectRowProps {
   isDragTarget: boolean;
   removeBusy: boolean;
   onSelectSession: (s: SessionInfo) => void;
+  pinnedSessionIds?: ReadonlySet<string>;
+  onTogglePin?: (id: string) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
   activeWorktreeSwitcher?: ReactNode;
@@ -95,6 +97,8 @@ function ProjectRow({
   isDragTarget,
   removeBusy,
   onSelectSession,
+  pinnedSessionIds,
+  onTogglePin,
   onRenamed,
   onSessionDeleted,
   activeWorktreeSwitcher,
@@ -421,6 +425,8 @@ function ProjectRow({
                   unreadSessionIds={unreadSessionIds}
                   relativeTimeNow={relativeTimeNow}
                   onSelectSession={onSelectSession}
+                  pinnedSessionIds={pinnedSessionIds}
+                  onTogglePin={onTogglePin}
                   onRenamed={onRenamed}
                   onSessionDeleted={onSessionDeleted}
                   depth={0}
@@ -725,6 +731,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
   unreadSessionIds,
   relativeTimeNow,
   onSelectSession,
+  pinnedSessionIds,
+  onTogglePin,
   onRenamed,
   onSessionDeleted,
   depth,
@@ -735,6 +743,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
   unreadSessionIds: Set<string>;
   relativeTimeNow: number;
   onSelectSession: (s: SessionInfo) => void;
+  pinnedSessionIds?: ReadonlySet<string>;
+  onTogglePin?: (id: string) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
   depth: number;
@@ -782,6 +792,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
           isUnread={isUnread}
           relativeTimeNow={relativeTimeNow}
           onClick={handleClick}
+          isPinned={pinnedSessionIds?.has(sessionId)}
+          onTogglePin={onTogglePin}
           onRenamed={onRenamed}
           onDeleted={handleDeleted}
           depth={depth}
@@ -801,6 +813,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
               unreadSessionIds={unreadSessionIds}
               relativeTimeNow={relativeTimeNow}
               onSelectSession={onSelectSession}
+              pinnedSessionIds={pinnedSessionIds}
+              onTogglePin={onTogglePin}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
               depth={depth + 1}
@@ -813,6 +827,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
 }, (prev, next) => {
   // Deep-changed inputs warrant a re-render; otherwise skip.
   if (prev.node !== next.node) return false;
+  if (prev.pinnedSessionIds !== next.pinnedSessionIds || prev.onTogglePin !== next.onTogglePin) return false;
   if (prev.selectedSessionId !== next.selectedSessionId) {
     // Only re-render if THIS node's selection state flipped.
     const id = prev.node.session.id;
@@ -837,6 +852,8 @@ const SessionItem = memo(function SessionItem({
   isSelected,
   isRunning,
   isUnread,
+  isPinned,
+  onTogglePin,
   onClick,
   onRenamed,
   onDeleted,
@@ -850,6 +867,8 @@ const SessionItem = memo(function SessionItem({
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
+  isPinned?: boolean;
+  onTogglePin?: (id: string) => void;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -1001,6 +1020,7 @@ const SessionItem = memo(function SessionItem({
         <input ref={inputRef} autoFocus aria-label={t("sessionSidebar.rename")} value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") void commitRename(); if (event.key === "Escape") { event.preventDefault(); renameCancelRef.current = true; setRenaming(false); } }} style={{ flex: 1, height: 25, padding: "3px 7px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }} />
       ) : (
         <>
+          {isPinned && <Pin size={11} style={{ flexShrink: 0, color: "var(--accent)" }} aria-label={t("sessionSidebar.pinned")} />}
           {depth > 0 && <GitBranch size={11} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />}
           <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
             <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
@@ -1024,6 +1044,10 @@ const SessionItem = memo(function SessionItem({
                   <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
                 </button>
                 <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="below" minWidth={128}>
+                  {onTogglePin && <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); onTogglePin(session.id); }} style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                    {isPinned ? <PinOff size={12} /> : <Pin size={12} />}
+                    {t(isPinned ? "sessionSidebar.unpin" : "sessionSidebar.pin")}
+                  </button>}
  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}>{t("sessionSidebar.copyTranscript")}</button>

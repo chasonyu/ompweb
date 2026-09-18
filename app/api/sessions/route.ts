@@ -1,3 +1,4 @@
+import { readSessionPins } from "@/lib/session-pins";
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listAllSessions } from "@/lib/session-reader";
@@ -18,7 +19,9 @@ export async function GET(req: Request) {
     const sessions = await listAllSessions();
     const runningSessions = getRunningRpcSessions();
     const runningSessionIds = runningSessions.map((s) => s.id);
-    const body = { sessions, runningSessionIds, runningSessions };
+    const existing = new Set(sessions.map((session) => session.id));
+    const pinnedSessionIds = readSessionPins().filter((id) => existing.has(id));
+    const body = { sessions, runningSessionIds, runningSessions, pinnedSessionIds };
     const bodyJson = JSON.stringify(body);
     const etag = `"${createHash("sha1").update(bodyJson).digest("hex").slice(0, 16)}"`;
     if (req.headers.get("if-none-match") === etag) {
