@@ -4,14 +4,14 @@ import { memo, useCallback, useRef, useState, type Dispatch, type ReactNode, typ
 import type { AgentMessage, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Check, ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin, Plus, Trash2 } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
 import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
 import {
-  MAX_PROJECT_SESSIONS,
+  visibleSessionRoots,
   displayCwd,
   formatRelativeTime,
   projectLabel,
@@ -134,7 +134,7 @@ function ProjectRow({
   const label = project.alias ?? projectLabel(project.path);
   const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0));
   const visibleRoots = hiddenCount > 0 && !showAllSessions
-    ? tree.slice(0, MAX_PROJECT_SESSIONS)
+    ? visibleSessionRoots(tree)
     : tree;
 
   return (
@@ -786,6 +786,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
           onDeleted={handleDeleted}
           depth={depth}
           hasChildren={hasChildren}
+          hasBranches={node.hasBranches}
           collapsed={collapsed}
           onToggleCollapse={handleToggleCollapse}
         />
@@ -842,6 +843,7 @@ const SessionItem = memo(function SessionItem({
   onDeleted,
   depth = 0,
   hasChildren = false,
+  hasBranches = hasChildren,
   collapsed = false,
   relativeTimeNow,
   onToggleCollapse,
@@ -855,6 +857,7 @@ const SessionItem = memo(function SessionItem({
   onDeleted?: (id: string) => void;
   depth?: number;
   hasChildren?: boolean;
+  hasBranches?: boolean;
   relativeTimeNow: number;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -870,6 +873,24 @@ const SessionItem = memo(function SessionItem({
   const inputRef = useRef<HTMLInputElement>(null);
   const contentButtonRef = useRef<HTMLButtonElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const [pinBusy, setPinBusy] = useState(false);
+  const togglePin = async () => {
+    if (pinBusy) return;
+    setPinBusy(true);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/pin`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned: !session.pinnedAt }),
+      });
+      if (!response.ok) throw new Error("Session pin failed");
+      onRenamed?.();
+    } catch {
+      toast.error(t("sessionSidebar.pinFailed"));
+    } finally {
+      setPinBusy(false);
+    }
+  };
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   const relativeTime = formatRelativeTime(session.modified, locale, relativeTimeNow);
   const rowBackground = isSelected
@@ -1001,6 +1022,7 @@ const SessionItem = memo(function SessionItem({
         <input ref={inputRef} autoFocus aria-label={t("sessionSidebar.rename")} value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") void commitRename(); if (event.key === "Escape") { event.preventDefault(); renameCancelRef.current = true; setRenaming(false); } }} style={{ flex: 1, height: 25, padding: "3px 7px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }} />
       ) : (
         <>
+          {session.pinnedAt && <Pin size={12} aria-label={t("sessionSidebar.pinned")} style={{ flexShrink: 0, color: "var(--accent)" }} />}
           {depth > 0 && <GitBranch size={11} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />}
           <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
             <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
@@ -1024,7 +1046,8 @@ const SessionItem = memo(function SessionItem({
                   <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
                 </button>
                 <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="below" minWidth={128}>
- <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
+                  <button type="button" role="menuitem" className="sidebar-menu-item" disabled={pinBusy} onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void togglePin(); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: pinBusy ? "default" : "pointer", textAlign: "left", fontSize: 11 }}>{t(session.pinnedAt ? "sessionSidebar.unpin" : "sessionSidebar.pin")}</button>
+ <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={hasBranches} title={hasBranches ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasBranches ? "var(--text-dim)" : "var(--text-muted)", cursor: hasBranches ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasBranches ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}>{t("sessionSidebar.copyTranscript")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" disabled={deleting} onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>

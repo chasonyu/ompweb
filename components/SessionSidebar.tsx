@@ -1397,7 +1397,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 activity={projectActivity.get(comparableProjectPath(project.path))}
                 tree={tree}
                 isExpanded={expandedProjectKeys.has(comparableProjectPath(project.path))}
-                hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
+                hiddenCount={filtersActive ? 0 : Math.max(0, tree.filter((node) => !node.session.pinnedAt).length - MAX_PROJECT_SESSIONS)}
                 selectedSessionId={selectedSessionId}
                 runningSessionIds={runningSessionIds}
                 unreadSessionIds={unreadSessionIds}

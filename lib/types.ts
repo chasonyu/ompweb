@@ -416,6 +416,8 @@ export interface SessionTreeNode {
 }
 
 export interface SessionInfo {
+  /** Web sidebar pin; stored separately from the OMP transcript. */
+  pinnedAt?: number;
   path: string;
   id: string;
   cwd: string;

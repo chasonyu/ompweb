@@ -121,6 +121,7 @@ function formatRelativeTime(value: string, _locale: string, now: number): string
 interface SessionTreeNode {
   session: SessionInfo;
   children: SessionTreeNode[];
+  hasBranches?: boolean;
 }
 
 function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
@@ -151,22 +152,29 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   const roots: SessionTreeNode[] = [];
   for (const node of byId.values()) {
     const ancestor = resolveAncestor(node.session.id);
-    if (ancestor) {
+    if (ancestor) byId.get(ancestor)!.hasBranches = true;
+    if (ancestor && !node.session.pinnedAt) {
       byId.get(ancestor)!.children.push(node);
     } else {
       roots.push(node);
     }
   }
 
-  // Sort each level by modified desc
+  // Pins have a stable order independent of subsequent conversation activity.
   const sort = (nodes: SessionTreeNode[]) => {
-    nodes.sort((a, b) => b.session.modified.localeCompare(a.session.modified));
+    nodes.sort((a, b) => (b.session.pinnedAt ?? 0) - (a.session.pinnedAt ?? 0)
+      || b.session.modified.localeCompare(a.session.modified));
     nodes.forEach((n) => sort(n.children));
   };
   sort(roots);
   return roots;
 }
 const MAX_PROJECT_SESSIONS = 5;
+
+function visibleSessionRoots(tree: SessionTreeNode[]): SessionTreeNode[] {
+  let ordinary = 0;
+  return tree.filter((node) => node.session.pinnedAt || ordinary++ < MAX_PROJECT_SESSIONS);
+}
 export {
   EMPTY_PROJECT_SET,
   EXPANDED_PROJECTS_STORAGE_KEY,
@@ -175,6 +183,7 @@ export {
   MAX_PROJECT_SESSIONS,
   UNREAD_SESSIONS_STORAGE_KEY,
   buildSessionTree,
+  visibleSessionRoots,
   displayCwd,
   formatRelativeTime,
   loadExpandedProjects,

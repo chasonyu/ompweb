@@ -1,4 +1,8 @@
 {
+  "sessionSidebar.pin": "置顶",
+  "sessionSidebar.unpin": "取消置顶",
+  "sessionSidebar.pinned": "已置顶",
+  "sessionSidebar.pinFailed": "置顶设置失败，请重试",
   "agentSession.advisorDisabled": "顾问已禁用 — 请通过输入框中的星形图标启用。",
   "agentSession.commandCompleted": "命令已完成",
   "agentSession.commandRequiresArgs": "用法：{command} {usage}",

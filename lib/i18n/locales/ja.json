@@ -1,4 +1,8 @@
 {
+  "sessionSidebar.pin": "ピン留め",
+  "sessionSidebar.unpin": "ピン留め解除",
+  "sessionSidebar.pinned": "ピン留め済み",
+  "sessionSidebar.pinFailed": "ピン留めの更新に失敗しました。再試行してください。",
   "agentSession.advisorDisabled": "アドバイザーが無効です — コンポーザーのスパークルアイコンで有効にしてください。",
   "agentSession.commandCompleted": "コマンドが完了しました",
   "agentSession.commandRequiresArgs": "使用法: {command} {usage}",

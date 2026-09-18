@@ -1,4 +1,8 @@
 {
+  "sessionSidebar.pin": "Pin",
+  "sessionSidebar.unpin": "Unpin",
+  "sessionSidebar.pinned": "Pinned",
+  "sessionSidebar.pinFailed": "Could not update session pin. Please retry.",
   "agentSession.advisorDisabled": "Advisor is disabled — enable it with the sparkles toggle in the composer.",
   "agentSession.commandCompleted": "Command completed",
   "agentSession.commandRequiresArgs": "Usage: {command} {usage}",
