@@ -1142,6 +1142,19 @@ export function AppShell() {
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
+    // RPC sessions do not auto-title. Name an untitled session after its first
+    // completed turn, when the native process has persisted the conversation.
+    if (selectedSession && !selectedSession.name) {
+      const id = selectedSession.id;
+      void fetch(`/api/sessions/${encodeURIComponent(id)}/auto-name`, { method: "POST" })
+        .then(async (response) => response.ok ? response.json() : null)
+        .then((body: { title?: string } | null) => {
+          if (!body?.title) return;
+          setRefreshKey((key) => key + 1);
+          setSelectedSession((current) => current?.id === id && !current.name ? { ...current, name: body.title } : current);
+        })
+        .catch(() => { /* Naming can be retried with the title button. */ });
+    }
     if (document.visibilityState !== "hidden" || !("Notification" in window)) return;
 
     const targetSession = selectedSession;

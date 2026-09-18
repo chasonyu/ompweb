@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { scanSessionInfo, setSessionTitle } from "@/lib/omp/session-files";
+import { scanSessionInfo, setSessionTitle, readFirstUserMessage } from "@/lib/omp/session-files";
 import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { invalidateSessionCaches } from "@/lib/session-reader";
@@ -8,10 +8,9 @@ import { resolveSessionPathOr404 } from "@/lib/api-utils";
 /**
  * POST /api/sessions/[id]/auto-name
  *
- * omp auto-generates session titles itself (persisted in the title slot), so
- * this endpoint no longer runs an LLM: it returns the live session's title
- * when the session is running, else the persisted title, else a fallback
- * derived from the first user message (persisted so the sidebar updates).
+ * Preserve an existing live/stored title; otherwise derive one from the first
+ * real user message. RPC disables native auto-titling, so persist through the
+ * live child when present and through the title slot otherwise.
  */
 export async function POST(
   _req: Request,
@@ -52,7 +51,9 @@ export async function POST(
       return NextResponse.json({ title: storedTitle, usage: null });
     }
 
-    const derived = deriveSessionTitleFromFirstMessage(info?.firstMessage);
+    // Do not trust the list preview: it is only a 4 KiB prefix and can
+    // even fall back to developer/assistant text. Naming needs a real user.
+    const derived = deriveSessionTitleFromFirstMessage(readFirstUserMessage(filePath));
     if (!derived) {
       return NextResponse.json(
         { error: "The session has no user messages to name", code: "session_no_messages_to_name" },
@@ -60,14 +61,19 @@ export async function POST(
       );
     }
 
-    // Persist only when no live process owns the file; a running session will
-    // title itself and would clobber our write on its next flush anyway.
-    if (!running) {
+    // RPC disables native auto-titling. Let the live process own persistence
+    // rather than writing behind its back and losing the title on its flush.
+    if (running && rpc) {
+      await rpc.send({ type: "set_session_name", name: derived });
+    } else {
       setSessionTitle(filePath, derived, "auto");
     }
     invalidateSessionCaches(filePath);
     return NextResponse.json({ title: derived, usage: null });
   } catch (error) {
+    if (error instanceof RangeError) {
+      return NextResponse.json({ error: "Session file is too large to name", code: "session_file_too_large" }, { status: 413 });
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },

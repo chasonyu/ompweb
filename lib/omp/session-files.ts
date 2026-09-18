@@ -404,7 +404,7 @@ export const MAX_SESSION_LOAD_BYTES = 1024 * 1024 * 1024;
  */
 export function forEachFileLineSync(
   filePath: string,
-  onLine: (line: string, offset: number, length: number) => void,
+  onLine: (line: string, offset: number, length: number) => void | boolean,
 ): void {
   const fd = openSync(filePath, "r");
   try {
@@ -425,7 +425,7 @@ export function forEachFileLineSync(
         length += end - start;
         if (end < bytesRead) {
           fragments.push(decoder.end());
-          onLine(fragments.join(""), offset, length);
+          if (onLine(fragments.join(""), offset, length) === false) return;
           fragments.length = 0;
           offset += length + 1;
           length = 0;
@@ -440,6 +440,28 @@ export function forEachFileLineSync(
   } finally {
     closeSync(fd);
   }
+}
+
+/** On-demand naming scan. Unlike the cheap sidebar prefix scan, this walks
+ * complete records until a real user message is found. Return false closes
+ * the reader immediately, so the rest of a long conversation is never read.
+ */
+export function readFirstUserMessage(filePath: string): string | undefined {
+  if (statSync(filePath).size > MAX_SESSION_LOAD_BYTES) {
+    throw new RangeError("Session file is too large to scan for a title");
+  }
+  let firstMessage: string | undefined;
+  forEachFileLineSync(filePath, (line) => {
+    let entry: Record<string, unknown>;
+    try { entry = JSON.parse(line); } catch { return; }
+    if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) return;
+    if (entry.message.role !== "user" || entry.message.synthetic === true) return;
+    const text = extractTextFromContent(entry.message.content).trim();
+    if (!text) return;
+    firstMessage = text;
+    return false;
+  });
+  return firstMessage;
 }
 
 /**
