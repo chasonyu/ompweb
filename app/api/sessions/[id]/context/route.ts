@@ -4,6 +4,7 @@ import { loadSessionFile } from "@/lib/omp/session-files";
 import { buildSessionContext, getSessionContextBoundary, getSessionEntriesForDisplayAsync, getSessionHistoryPage, readSessionHeader, SessionFileTooLargeError } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
+import type { WebSessionState } from "@/lib/pi-types";
 import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionSyncResponse } from "@/lib/session-sync";
 
 /** Uniform error mapping for this route: the display read throws
@@ -64,6 +65,20 @@ export async function GET(
   try {
     const resolved = await resolveSessionPathOr404(id);
     if ("response" in resolved) {
+      if (boundary === "1") {
+        const session = getRpcSession(id);
+        // Slash completion creates an RPC session before its first prompt.
+        // Only a confirmed empty, idle session may lack a persisted boundary.
+        if (session?.isAlive() && !session.isRunning() && session.sessionFile && !existsSync(session.sessionFile)) {
+          const state = await session.send({ type: "get_state" }) as WebSessionState;
+          if (state.sessionId === id && state.messageCount === 0 && state.isStreaming === false
+            && state.isCompacting === false && session.isAlive() && !session.isRunning()
+            && !existsSync(session.sessionFile)) {
+            return NextResponse.json({ entryIds: [] }, { headers: { "Cache-Control": "no-store" } });
+          }
+        }
+        return resolved.response;
+      }
       // OMP may not create the file until the first assistant message is
       // committed. A live wrapper can still recover that first partial reply.
       // Never replace previously confirmed history when its file is missing.

@@ -1,3 +1,4 @@
+import { getEntryUserPromptText } from "../user-turn";
 import { randomUUID } from "crypto";
 import type { Dirent } from "fs";
 import {
@@ -725,15 +726,6 @@ function extractFirstDisplayMessageFromPrefix(content: string): string | undefin
   return fallback;
 }
 
-function extractTextFromContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const text: string[] = [];
-  for (const block of content) {
-    if (isRecord(block) && block.type === "text" && typeof block.text === "string") text.push(block.text);
-  }
-  return text.join(" ");
-}
 
 interface TailMessage {
   role?: string;
@@ -908,10 +900,10 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       }
       if (entry.type === "message" && entry.message) {
         parsedMessageCount++;
-        if (entry.message.role === "user" && !firstMessage) {
-          firstMessage = extractTextFromContent(entry.message.content);
-        }
+
       }
+      if (!firstMessage) firstMessage = getEntryUserPromptText(entry) ?? "";
+      if (entry.type === "custom_message" && getEntryUserPromptText(entry) !== undefined) parsedMessageCount++;
     }
 
     if (!header.title && !firstMessage && size > SESSION_LIST_PREFIX_BYTES) {
@@ -924,10 +916,8 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
         } catch {
           return;
         }
-        if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) return;
-        if (entry.message.role !== "user") return;
-        const text = extractTextFromContent(entry.message.content);
-        if (!text.trim()) return;
+        const text = getEntryUserPromptText(entry);
+        if (!text?.trim()) return;
         firstMessage = text;
         return false;
       });

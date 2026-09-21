@@ -68,6 +68,7 @@ export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent
 
 export interface UserMessage {
   role: "user";
+  attribution?: "user" | "agent";
   content: string | (TextContent | ImageContent)[];
   timestamp?: number;
 }
@@ -112,6 +113,7 @@ export interface ToolResultMessage {
 
 export interface CustomMessage {
   role: "custom";
+  attribution?: "user" | "agent";
   customType: string;
   content: string | (TextContent | ImageContent)[];
   display: boolean;
@@ -330,6 +332,7 @@ export interface CustomEntry extends SessionEntryBase {
 
 export interface CustomMessageEntry extends SessionEntryBase {
   type: "custom_message";
+  attribution?: "user" | "agent";
   customType: string;
   content: string | (TextContent | ImageContent)[];
   details?: unknown;

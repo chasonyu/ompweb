@@ -1,3 +1,4 @@
+import { isUserTurnMessage } from "@/lib/user-turn";
 import { historyCursor, type SessionHistoryCursor, type SessionLiveSnapshot, type SessionStreamCursor, type SessionSyncResponse } from "@/lib/session-sync";
 import type { SessionContext } from "@/lib/types";
 import type { AgentEvent } from "./useAgentSession-stream";
@@ -200,7 +201,7 @@ export function createSessionCatchUp(options: {
       }
       const lifecycle = /^(agent_start|agent_end|prompt_result|prompt_error|auto_compaction_start|auto_compaction_end)$/.test(event.type);
       const message = /^(message_start|message_update|message_end)$/.test(event.type)
-        && (event.message as { role?: unknown } | undefined)?.role !== "user";
+        && !isUserTurnMessage(event.message);
       const tool = /^tool_execution_(start|update|end)$/.test(event.type) && typeof event.toolCallId === "string" ? event.toolCallId : null;
       const floor = lifecycle ? Math.max(lifecycleSequence, messageSequence, latestToolSequence)
         : message ? Math.max(lifecycleSequence, messageSequence)

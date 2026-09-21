@@ -1,4 +1,6 @@
 "use client";
+
+import { isUserTurnMessage, getUserPromptText } from "@/lib/user-turn";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
@@ -79,17 +81,7 @@ const CHAT_COLUMN_MAX_WIDTH_DESKTOP = `min(${CHAT_COLUMN_MAX_WIDTH}px, calc(100%
 const LOAD_MORE_ROOT_MARGIN = "400px 0px 0px 0px";
 
 function getUserInputText(message: AgentMessage): string | null {
-  if (message.role !== "user") return null;
-  if (typeof message.content === "string") {
-    const text = message.content.trim();
-    return text.length > 0 ? text : null;
-  }
-  const text = message.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
-  return text.length > 0 ? text : null;
+  return getUserPromptText(message)?.trim() || null;
 }
 
 function withAssistantBlocks(
@@ -345,7 +337,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   // omp's `branch` command accepts a user entry only, so every row forks at the
   // user prompt that started its turn (#103).
   const forkEntryIds = useMemo(
-    () => resolveForkEntryIds(messages.map((message) => message.role), entryIds),
+    () => resolveForkEntryIds(messages, entryIds),
     [messages, entryIds],
   );
 
@@ -356,10 +348,10 @@ const CommittedTranscript = memo(function CommittedTranscript({
   const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
     const msg = options.messageOverride ?? messages[idx];
     const prevAssistantEntryId =
-      msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
+      isUserTurnMessage(msg) && idx > 0 && messages[idx - 1].role === "assistant"
         ? entryIds[idx - 1]
         : undefined;
-    const isVisible = msg.role === "user" || msg.role === "assistant";
+    const isVisible = isUserTurnMessage(msg) || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
     const keyPrefix = options.keyPrefix ?? "message";
     let showTimestamp = false;
@@ -367,7 +359,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
       showTimestamp = true;
       for (let j = idx + 1; j < messages.length; j++) {
         const r = messages[j].role;
-        if (r === "user") break;
+        if (isUserTurnMessage(messages[j])) break;
         if (r === "assistant") { showTimestamp = false; break; }
       }
       // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp)
@@ -862,7 +854,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       if (message.role === "toolResult") toolResultsMap.set((message as ToolResultMessage).toolCallId, message as ToolResultMessage);
       if (message.role === "custom" && message.customType === "compaction") hasCompaction = true;
       if (isGroupAnchor(message)) lastAnchorIdx = index;
-      if (message.role === "user" || message.role === "assistant") visibleRefIndexByMessage.set(index, refIdx++);
+      if (isUserTurnMessage(message) || message.role === "assistant") visibleRefIndexByMessage.set(index, refIdx++);
     });
     return { toolResultsMap, lastAnchorIdx, hasCompaction, visibleRefIndexByMessage };
   }, [messages]);

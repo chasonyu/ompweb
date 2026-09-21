@@ -1,3 +1,4 @@
+import { getEntryUserPromptText, getUserPromptText } from "@/lib/user-turn";
 import { NextResponse } from "next/server";
 import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync } from "fs";
 import * as fsRuntime from "fs";
@@ -53,6 +54,11 @@ const MAX_PROJECTED_TREE_DEPTH = 200;
 const MAX_BRANCH_PREVIEW_LENGTH = 40;
 
 function branchPreviewForEntry(entry: { id?: string; type?: string; message?: unknown }): { role?: "user" | "assistant"; text: string } | undefined {
+  const prompt = getEntryUserPromptText(entry);
+  if (prompt !== undefined) {
+    const text = prompt.replace(/\s+/g, " ").trim();
+    return { role: "user", text: text.length > MAX_BRANCH_PREVIEW_LENGTH ? `${text.slice(0, MAX_BRANCH_PREVIEW_LENGTH)}…` : text };
+  }
   if (entry.type !== "message" || !entry.message || typeof entry.message !== "object" || Array.isArray(entry.message)) return undefined;
   const message = entry.message as { role?: unknown; content?: unknown };
   let text = typeof message.content === "string"
@@ -218,13 +224,7 @@ export async function GET(
       created: header.timestamp,
       modified,
       messageCount: context.messages.length,
-      firstMessage: context.messages.find((m) => m.role === "user")
-        ? (() => {
-            const msg = context.messages.find((m) => m.role === "user")!;
-            const c = (msg as { content: unknown }).content;
-            return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
-          })()
-        : "(no messages)",
+      firstMessage: context.messages.map(getUserPromptText).find((text) => text?.trim()) || "(no messages)",
       parentSessionId,
     };
 

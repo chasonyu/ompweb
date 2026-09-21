@@ -1254,6 +1254,7 @@ export function entryToUiMessage(
     case "custom_message":
       return {
         role: "custom",
+        attribution: entry.attribution,
         customType: entry.customType,
         content: entry.content,
         display: entry.display,

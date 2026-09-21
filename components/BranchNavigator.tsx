@@ -1,5 +1,7 @@
 "use client";
 
+import { getEntryUserPromptText } from "@/lib/user-turn";
+
 import { useState, useCallback, useMemo, memo, useRef, useEffect } from "react";
 import { GitBranch } from "lucide-react";
 import { translate, useI18n } from "@/lib/i18n";
@@ -46,6 +48,11 @@ function isMessageEntry(entry: SessionEntry): entry is SessionEntry & { message:
 }
 
 function messagePreview(entry: SessionEntry): BranchPreview | undefined {
+  const prompt = getEntryUserPromptText(entry);
+  if (prompt !== undefined) {
+    const text = prompt.replace(/\s+/g, " ").trim();
+    return { role: "user", text: text.length > 40 ? `${text.slice(0, 40)}…` : text };
+  }
   if (!isMessageEntry(entry)) return undefined;
   const content = entry.message.content;
   let text = typeof content === "string"

@@ -10,6 +10,10 @@ const jiti = createJiti(import.meta.url, {
 });
 const { ChatMinimap, extractPreviewText, getBarWidth } = await jiti.import("./ChatMinimap.tsx");
 
+test("skill navigation previews original input, not expanded context", () => {
+  assert.equal(extractPreviewText({ role: "custom", customType: "skill-prompt", attribution: "user", content: "Expanded instructions", details: { name: "check", args: "测试" } }), "/skill:check 测试");
+});
+
 test("extractPreviewText extracts clean text from user string content", () => {
   const preview = extractPreviewText({
     role: "user",

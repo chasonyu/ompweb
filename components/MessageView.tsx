@@ -8,6 +8,7 @@ import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
+import { isUserTurnMessage, getUserPromptText } from "@/lib/user-turn";
 import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
@@ -235,6 +236,13 @@ function haveSameRelevantToolResults(
 }
 
 export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
+  if (message.role === "custom" && isUserTurnMessage(message)) {
+    const prompt: UserMessage = { role: "user", content: message.customType === "skill-prompt" ? getUserPromptText(message) ?? "/skill" : message.content, timestamp: message.timestamp };
+    return <>
+      <UserMessageView message={prompt} cwd={cwd} onOpenFile={onOpenFile} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />
+      {message.customType === "skill-prompt" && <SkillPromptContext message={message} cwd={cwd} onOpenFile={onOpenFile} />}
+    </>;
+  }
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
@@ -336,6 +344,14 @@ function ForkSessionButton({ entryId, onFork, forking }: {
     </Tooltip>
   );
 }
+function SkillPromptContext({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  const { t } = useI18n();
+  return <details style={{ marginBottom: 16, color: "var(--text-muted)" }}>
+    <summary style={{ cursor: "pointer", fontSize: 12 }}>{t("messageView.skillContext")}</summary>
+    <CustomMessageView message={message} cwd={cwd} onOpenFile={onOpenFile} />
+  </details>;
+}
+
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;

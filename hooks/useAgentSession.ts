@@ -1,5 +1,7 @@
 "use client";
 
+import { isUserTurnMessage, matchesQueuedUserPrompt } from "@/lib/user-turn";
+
 import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "react";
 import type {
   AgentMessage,
@@ -414,7 +416,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!agentRunningRef.current) setTodoPhases(context.todoPhases ?? []);
         setActiveLeafId(leafId);
         const previous = runPreviousEntryIdsRef.current && new Set(runPreviousEntryIdsRef.current);
-        if (previous && context.messages.some((message, i) => message.role === "user" && !previous.has(context.entryIds[i]))) {
+        if (previous && context.messages.some((message, i) => isUserTurnMessage(message) && !previous.has(context.entryIds[i]))) {
           setOptimisticUserMessage(null);
         }
         // The saved toolResult, not native message_end, owns the handoff.
@@ -473,7 +475,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let toolResults = 0;
     let toolCalls = 0;
     for (const msg of messages) {
-      if (msg.role === "user") userMessages += 1;
+      if (isUserTurnMessage(msg)) userMessages += 1;
       if (msg.role === "toolResult") toolResults += 1;
       if (msg.role !== "assistant") continue;
       assistantMessages += 1;
@@ -981,12 +983,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // below can restore everything the mount flow sets up — not just the stream.
   const reconnectActionsRef = useRef<((sid: string) => void) | null>(null);
 
-  const consumeQueuedMessage = useCallback((text: string) => {
-    if (!text) return;
+  const consumeQueuedMessage = useCallback((message: AgentMessage) => {
     setQueuedMessages((prev) => {
-      const si = prev.steering.indexOf(text);
+      const si = prev.steering.findIndex((text) => matchesQueuedUserPrompt(text, message));
       if (si !== -1) return { ...prev, steering: prev.steering.filter((_, i) => i !== si) };
-      const fi = prev.followUp.indexOf(text);
+      const fi = prev.followUp.findIndex((text) => matchesQueuedUserPrompt(text, message));
       if (fi !== -1) return { ...prev, followUp: prev.followUp.filter((_, i) => i !== fi) };
       return prev;
     });
@@ -1042,8 +1043,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const event = JSON.parse(e.data) as AgentEvent;
           const order = catchUp.observe(event);
           if (order === "stale") {
-            if (event.type === "message_end" && (event.message as AgentMessage | undefined)?.role === "user") {
-              consumeQueuedMessage(extractMessageText(event.message as AgentMessage));
+            if (event.type === "message_end" && isUserTurnMessage(event.message)) {
+              consumeQueuedMessage(event.message as AgentMessage);
             }
             return;
           }
@@ -1475,7 +1476,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const { messages, entryIds = [] } = loaded.context;
         // Only the latest user turn can answer the current prompt. Entry ids
         // distinguish repeated same-text prompts from the previous saved turn.
-        const userIndex = messages.findLastIndex((message) => message.role === "user");
+        const userIndex = messages.findLastIndex(isUserTurnMessage);
         const userEntryId = entryIds[userIndex];
         if (userIndex >= 0 && userEntryId && !previousEntryIds.includes(userEntryId)) {
           for (let i = userIndex + 1; i < messages.length; i += 1) {
@@ -2015,7 +2016,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const msg = event.message as Partial<AgentMessage> | undefined;
         const messageError = readAgentError(msg);
         if (messageError) lastRunErrorRef.current = messageError;
-        if (msg?.role === "user") {
+        if (isUserTurnMessage(msg)) {
           break;
         }
         if (msg?.role === "custom" && (msg as CustomMessage).customType === "advisor") {
@@ -2047,9 +2048,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const text = extractMessageText(completed as Partial<AgentMessage>);
           if (text && isQuotaLikeError(text)) lastQuotaErrorRef.current = text.slice(0, 800);
         }
-        if (completed && completed.role === "user") {
+        if (isUserTurnMessage(completed)) {
           // Queue delivery is a live side effect; persisted IDs alone commit history.
-          consumeQueuedMessage(extractMessageText(completed));
+          consumeQueuedMessage(completed);
         } else if (completed?.role === "custom" && (completed as CustomMessage).customType === "xdev-mount-notice") {
           toast.info("MCP tools updated", describeMcpMountNotice(completed as CustomMessage), { clamp: true });
         } else if (completed) {

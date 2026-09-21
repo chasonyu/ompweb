@@ -14,6 +14,16 @@ const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } =
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
 afterEach(cleanup);
 
+test("user skill renders the original command as a user bubble with optional expanded context", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: { role: "custom", customType: "skill-prompt", attribution: "user", display: true, content: "Expanded skill instructions", details: { name: "check", args: "测试" } },
+  }));
+  assert.match(html, /\/skill:check 测试/);
+  assert.match(html, /align-items:flex-end/);
+  assert.match(html, /Expanded skill instructions/);
+  assert.match(html, /<details/);
+});
+
 test("sent messages without timestamps or branch metadata still offer copy", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     message: { role: "user", content: "Keep this message copyable." },

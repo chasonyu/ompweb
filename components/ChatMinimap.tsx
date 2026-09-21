@@ -1,5 +1,7 @@
 "use client";
 
+import { isUserTurnMessage, getUserPromptText } from "@/lib/user-turn";
+
 import { memo, useEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
 import type { AgentMessage, TextContent } from "@/lib/types";
 
@@ -24,16 +26,8 @@ export interface NavNode {
 export function extractPreviewText(msg: AgentMessage | Partial<AgentMessage>): string {
   let raw = "";
 
-  if (msg.role === "user") {
-    const content = msg.content;
-    if (typeof content === "string") {
-      raw = content;
-    } else if (Array.isArray(content)) {
-      raw = content
-        .filter((b): b is TextContent => Boolean(b && typeof b === "object" && "type" in b && b.type === "text" && "text" in b && typeof b.text === "string"))
-        .map((b) => b.text)
-        .join(" ");
-    }
+  if (isUserTurnMessage(msg)) {
+    raw = getUserPromptText(msg) ?? "";
   } else if (msg.role === "assistant") {
     const blocks = Array.isArray(msg.content) ? msg.content : [];
     const text = blocks
@@ -100,9 +94,9 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
-      if (msg.role !== "user" && msg.role !== "assistant") continue;
+      if (!isUserTurnMessage(msg) && msg.role !== "assistant") continue;
       const currentRef = refIndex++;
-      if (msg.role === "user") {
+      if (isUserTurnMessage(msg)) {
         const text = extractPreviewText(msg);
         if (text) {
           const id = msg && typeof msg === "object" && "id" in msg && typeof msg.id === "string" ? msg.id : `u-${i}`;
@@ -124,7 +118,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     let aRef = 0;
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
-      if (msg.role !== "user" && msg.role !== "assistant") continue;
+      if (!isUserTurnMessage(msg) && msg.role !== "assistant") continue;
       const currentRef = aRef++;
       if (msg.role === "assistant") {
         const text = extractPreviewText(msg);

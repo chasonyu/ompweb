@@ -2,6 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createJiti } from "jiti";
 import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 
@@ -1403,6 +1406,115 @@ test("wrapper epoch changes reject an old HTTP snapshot and hydrate the replacem
   await settle();
   assert.equal(w.latest.streamState.streamingMessage?.content[0].text, "replacement wrapper");
   assert.equal(w.latest.agentRunning, true);
+});
+
+for (const mode of ["slash menu then slash", "pasted slash", "slash menu then plain text"]) {
+  test(`first prompt after ${mode} uses the real unpersisted boundary route`, async () => {
+    resetWorld();
+    const dir = mkdtempSync(join(tmpdir(), "ompweb-first-slash-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = dir;
+    const { invalidateSessionListCache } = await jiti.import("@/lib/session-reader");
+    const { GET } = await jiti.import("../app/api/sessions/[id]/context/route.ts");
+    invalidateSessionListCache();
+    const id = "first-slash";
+    const wrapper = new AgentSessionWrapper({
+      isAlive: true,
+      onFrame() { return () => {}; },
+      sendCommand: async () => ({ sessionId: id, sessionFile: join(dir, "new.jsonl"), messageCount: 0, isStreaming: false, isCompacting: false }),
+      sendFrame() {},
+      dispose: async () => {},
+    }, dir);
+    wrapper.start();
+    await wrapper.send({ type: "get_state" });
+    globalThis.__ompSessions ??= new Map();
+    globalThis.__ompSessions.set(id, wrapper);
+    world.holds.push({
+      match: (method, url) => method === "POST" && url === "/api/agent/new",
+      produce: async () => ({ value: { sessionId: id } }),
+    }, {
+      match: (method, url) => method === "GET" && url === `/api/sessions/${id}/context?boundary=1`,
+      produce: async () => {
+        const response = await GET(new Request(`http://localhost/api/sessions/${id}/context?boundary=1`), { params: Promise.resolve({ id }) });
+        return { status: response.status, value: await response.json() };
+      },
+    });
+    let w;
+    try {
+      w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+      if (mode.startsWith("slash menu")) await act(async () => { await w.latest.loadSlashCommands(); });
+      let submission;
+      await act(async () => {
+        submission = mode.endsWith("plain text") ? w.latest.handleSend("hello") : w.latest.handleBuiltinSlashCommand("/explain this project");
+        await sleep(30);
+      });
+      assert.ok(lastEs());
+      await act(async () => { lastEs().open(); await submission; });
+      const prompts = world.calls.filter((call) => call.body?.type === "prompt");
+      assert.equal(prompts.length, 1, "first prompt must reach the agent after slash precreation");
+      assert.match(prompts[0].body.message, mode.endsWith("plain text") ? /hello/ : /this project/);
+      assert.deepEqual(w.latest.notices.filter((notice) => notice.type === "error"), []);
+    } finally {
+      w?.unmount();
+      await wrapper.destroyAndWait();
+      globalThis.__ompSessions.delete(id);
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+      invalidateSessionListCache();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("skill queue delivery consumes original input while history waits for persistence", async () => {
+  resetWorld();
+  primeSession("skill-queue", [userMsg("u0", "previous")]);
+  const { w, es } = await startRun("skill-queue", "ordinary prompt");
+  await act(async () => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "message_end", message: userMsg("u1", "ordinary prompt") });
+  });
+  await settle();
+  await act(async () => { await w.latest.handleFollowUp("/skill:check    queued"); await w.latest.handleFollowUp("next question"); });
+  const skill = { role: "custom", customType: "skill-prompt", attribution: "user", display: true, content: "Expanded instructions", details: { name: "check", args: "queued" } };
+  await act(async () => { es.emit({ type: "message_end", message: skill }, { persist: false }); });
+  await settle();
+  assert.deepEqual(w.latest.queuedMessages.followUp, ["next question"]);
+  assert.equal(w.latest.messages.some((m) => m.customType === "skill-prompt"), false);
+  await act(async () => { appendEntry("skill-queue", skill); publishSessionsChanged(["skill-queue"]); });
+  await settle();
+  assert.equal(w.latest.messages.at(-1).customType, "skill-prompt");
+  assert.equal(w.latest.messages.length, w.latest.entryIds.length);
+});
+
+test("persisted user skill replaces optimistic input in place and survives reload", async () => {
+  resetWorld();
+  primeSession("skill-run", []);
+  const { w, es } = await startRun("skill-run", "/skill:check 测试");
+  const skill = { role: "custom", customType: "skill-prompt", attribution: "user", display: true, content: "Expanded instructions", details: { name: "check", args: "测试" } };
+  await act(async () => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "message_start", message: skill });
+  });
+  assert.equal(w.latest.streamState.streamingMessage, null, "a skill prompt is input, not a streamed reply");
+  await act(async () => {
+    es.emit({ type: "message_end", message: { ...skill, attribution: "agent" } });
+  });
+  await settle();
+  assert.equal(w.latest.messages.at(-1).role, "user", "agent-injected skills must not acknowledge the user's pending input");
+  await act(async () => {
+    es.emit({ type: "message_end", message: skill });
+    es.emit({ type: "message_end", message: assistantMsg("reply", "Done") });
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await settle();
+  assert.deepEqual(w.latest.messages.map((m) => m.role), ["custom", "custom", "assistant"]);
+  assert.equal(w.latest.messages[1].attribution, "user");
+  assert.equal(w.latest.entryIds.length, w.latest.messages.length);
+  w.unmount();
+  const reloaded = await mountSession("skill-run");
+  assert.deepEqual(reloaded.latest.messages.map((m) => m.role), ["custom", "custom", "assistant"]);
+  assert.deepEqual(reloaded.latest.notices.filter((n) => n.type === "error"), []);
 });
 
 test("an abandoned new-chat send delivers its prompt without promoting or attaching a stream", async () => {

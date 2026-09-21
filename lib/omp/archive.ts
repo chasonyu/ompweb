@@ -1,3 +1,4 @@
+import { getEntryUserPromptText } from "../user-turn";
 import { createReadStream } from "fs";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createGunzip, gunzipSync } from "zlib";
@@ -89,15 +90,6 @@ async function readGzipPrefix(filePath: string, limit: number): Promise<Buffer> 
   return promise;
 }
 
-function textFromContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((block): block is { type?: unknown; text?: unknown } => typeof block === "object" && block !== null)
-    .filter((block) => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text as string)
-    .join(" ");
-}
 
 function parseArchivePrefix(prefix: Buffer, filePath: string, archiveRoot: string): ArchivedSessionRecord | undefined {
   const lines = prefix.toString("utf8").split(/\r?\n/).filter((line) => line.trim());
@@ -117,9 +109,9 @@ function parseArchivePrefix(prefix: Buffer, filePath: string, archiveRoot: strin
     for (const line of lines.slice(headerIndex + 1)) {
       try {
         const entry = JSON.parse(line) as { type?: string; message?: { role?: string; content?: unknown } };
-        if (entry.type !== "message" || !entry.message) continue;
-        messageCount++;
-        if (!firstMessage && entry.message.role === "user") firstMessage = textFromContent(entry.message.content);
+        const prompt = getEntryUserPromptText(entry);
+        if (entry.type === "message" || prompt !== undefined) messageCount++;
+        if (!firstMessage) firstMessage = prompt ?? "";
       } catch {
         // The final prefix line may be truncated; earlier metadata remains valid.
       }

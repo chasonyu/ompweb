@@ -1,3 +1,4 @@
+import { isUserTurnMessage } from "./user-turn";
 import { getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "./message-display";
 import type { AgentMessage, AssistantMessage, CustomMessage } from "./types";
 
@@ -87,7 +88,7 @@ export function hasDisplayableProcessMessage(message: AgentMessage): boolean {
 // summary as an anchor too, otherwise every post-compaction message renders
 // standalone and never collapses.
 export function isGroupAnchor(message: AgentMessage): boolean {
-  if (message.role === "user") return true;
+  if (isUserTurnMessage(message)) return true;
   return message.role === "custom" && (message as CustomMessage).customType === "compaction";
 }
 

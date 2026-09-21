@@ -1,3 +1,4 @@
+import { isUserTurnMessage } from "./user-turn";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
@@ -734,7 +735,7 @@ export class AgentSessionWrapper {
       case "message_start":
       case "message_update": {
         const message = event.message as Partial<AgentMessage> | undefined;
-        if (message && message.role !== "user") this.streamingMessage = message;
+        if (message && !isUserTurnMessage(message)) this.streamingMessage = message;
         if (this.responseRunActive && hasVisibleAssistantContent(message)) this.responseObserved = true;
         break;
       }

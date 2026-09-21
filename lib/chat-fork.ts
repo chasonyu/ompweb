@@ -1,3 +1,6 @@
+import type { AgentMessage } from "./types";
+import { isUserTurnMessage } from "./user-turn";
+
 /**
  * Fork targets for the message transcript.
  *
@@ -16,15 +19,16 @@
  */
 
 export function resolveForkEntryIds(
-  roles: readonly string[],
+  messages: readonly AgentMessage[],
   entryIds: readonly (string | undefined)[],
 ): (string | undefined)[] {
   let lastUserEntryId: string | undefined;
-  return roles.map((role, index) => {
-    if (role === "user") {
-      lastUserEntryId = entryIds[index];
+  return messages.map((message, index) => {
+    if (isUserTurnMessage(message)) {
+      // OMP branch accepts only ordinary user entries, not skill/collab custom entries.
+      lastUserEntryId = message.role === "user" ? entryIds[index] : undefined;
       return lastUserEntryId;
     }
-    return role === "assistant" ? lastUserEntryId : undefined;
+    return message.role === "assistant" ? lastUserEntryId : undefined;
   });
 }
