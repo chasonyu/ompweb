@@ -1,5 +1,5 @@
 import { execFile } from "child_process";
-import { resolveOmpBin } from "./omp-cli";
+import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
 
 export interface OmpUpdateStatus {
   currentVersion: string | null;
@@ -17,7 +17,8 @@ export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOU
   const bin = resolveOmpBin();
   if (!bin) return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN."));
   const { promise, resolve, reject } = Promise.withResolvers<string>();
-  execFile(bin, ["update", ...args], {
+  const target = wrapWindowsScript(bin, ["update", ...args]);
+  execFile(target.file, target.args, {
     timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
     env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
