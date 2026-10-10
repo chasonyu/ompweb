@@ -1,5 +1,6 @@
 // Streaming/SSE, message-transform, subagent, and session-protocol helpers
-// extracted from useAgentSession (pure logic only — no hook state).
+// extracted from useAgentSession (no hook state; host tools may touch browser
+// notifications and the notification-center history).
 
 import type {
   AgentMessage,
@@ -10,13 +11,14 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import type { RpcAvailableSlashCommand, TodoPhase } from "@/lib/pi-types";
+import type { QueuedMessages, RpcAvailableSlashCommand, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import type {
   SubagentHistoryEntry,
   SubagentInfo,
   SubagentProgress,
 } from "@/lib/subagent-types";
 import { translate } from "@/lib/i18n";
+import { toastHistory } from "@/components/ui/toast";
 import type { SessionStreamCursor } from "@/lib/session-sync";
 
 export interface SessionData {
@@ -157,6 +159,10 @@ export type AgentStateResponse = {
   thinkingLevel?: string;
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
+  slowModeSupported?: boolean;
+  slowModeEnabled?: boolean;
+  slowModeScope?: SlowModeScope;
+  usageLimit?: UsageLimitState;
   autoRetryEnabled?: boolean;
   interruptMode?: "immediate" | "wait";
   autoCompactionEnabled?: boolean;
@@ -170,8 +176,9 @@ export type AgentStateResponse = {
   tokensPerSecond?: number | null;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
-  // omp only reports a count; the queued texts are tracked client-side.
-  queuedMessageCount?: number;
+  queuedMessages?: QueuedMessages;
+  /** Untrusted until parsed by parseSkillDiagnosticsSnapshot. */
+  skillDiagnostics?: unknown;
   todoPhases?: TodoPhase[];
 };
 
@@ -187,7 +194,7 @@ export function toThinkingModelMeta(model: { provider?: string; id?: string; nam
   return { provider: model.provider, modelId: model.id, name: model.name, reasoning: model.reasoning, thinking: model.thinking };
 }
 
-export type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
+export type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" | "ask" }>;
 export type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 // omp's rpc-ui frames add open_url (OAuth) and cancel on top of lib/types' union.
 export type IncomingExtensionUiRequest =
@@ -232,7 +239,18 @@ export const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 export const PROMPT_SETTLE_POLL_MS = 600;
 export const PROMPT_SETTLE_MAX_MS = 20_000;
 export const AGENT_STATE_RECONCILE_MS = 15_000;
+// Stop waits at most this long to take queued messages back before aborting.
+export const WITHDRAW_BEFORE_ABORT_MS = 1_500;
 export const BASH_STATE_RECONCILE_MS = 1_000;
+// Cadence for re-reading a session that some OTHER `omp` process is running.
+// omp-web owns no wrapper for those, so /api/agent/<id>/events 409s and nothing
+// streams in; the only way their transcript advances is an explicit sync poll.
+// Fast enough to look live, far slower than the SSE path it stands in for.
+export const EXTERNAL_RUN_POLL_MS = 2_000;
+// A tail that stopped growing is not a live foreign run any more (its omp died,
+// or the run was interrupted between a tool call and its result). Stop polling;
+// the cheap heuristic below re-arms the poll if the transcript grows again.
+export const EXTERNAL_RUN_STALE_MS = 60_000;
 // A cold `omp --mode rpc-ui` spawn (extension + skill + LSP discovery) can take
 // far longer than a few seconds, and the SSE route may only answer once the
 // child is ready. Give up only after the child would have timed out anyway
@@ -284,6 +302,69 @@ export function isSafeOpenUrl(raw: unknown): boolean {
   if (!match) return false;
   const scheme = match[1].toLowerCase();
   return scheme === "http" || scheme === "https" || scheme === "mailto";
+}
+
+export interface HostToolHandlers {
+  /** Open a validated URL; returns the result text reported to the agent. */
+  openUrl: (url: string) => string;
+  /** Open a file tab; may return the result text reported to the agent. */
+  openFile?: (path: string, name: string) => string | void;
+}
+
+/**
+ * Execute an omp-web host tool (open_url / notify / open_file) and return the
+ * toolResult text. Shared by the session's own stream and by tabs answering
+ * calls for a session they are not viewing.
+ */
+export async function runHostTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  handlers: HostToolHandlers,
+): Promise<{ text: string; isError: boolean }> {
+  const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+  switch (toolName) {
+    case "open_url": {
+      const raw = str(args.url) ?? "";
+      if (!isSafeOpenUrl(raw)) return { text: "Unsafe or invalid URL not opened", isError: !!raw };
+      return { text: handlers.openUrl(raw), isError: false };
+    }
+    case "notify": {
+      const title = str(args.title) ?? "OMP";
+      const message = str(args.message) ?? "";
+      // Logged even when the OS blocks notifications, so the message is never lost.
+      toastHistory.record("info", title, message || undefined);
+      if (typeof Notification !== "undefined") {
+        try {
+          const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+          if (permission === "granted") {
+            const options = { body: message, icon: "/icon-192.png", badge: "/badge-96.png" };
+            // Chrome on Android only allows notifications through a service worker.
+            const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
+            if (registration) await registration.showNotification(title, options);
+            else new Notification(title, options);
+          }
+        } catch {
+          // Notification API blocked — the result still succeeds.
+        }
+      }
+      return { text: "Notification shown", isError: false };
+    }
+    case "open_file": {
+      const path = str(args.path) ?? "";
+      if (!path) return { text: "No path provided", isError: true };
+      let text: string | void = undefined;
+      if (handlers.openFile) {
+        try {
+          text = handlers.openFile(path, path.split(/[\\/]/).pop() || path);
+        } catch {
+          // ignore navigation failures
+        }
+      }
+      return { text: text || `Opened ${path}`, isError: false };
+    }
+    default:
+      return { text: `Host tool "${toolName}" is not available in omp-web`, isError: true };
+  }
 }
 
 export function delay(ms: number): Promise<void> {
@@ -356,7 +437,7 @@ export interface AttachedImage {
 }
 
 export type SelectedModel = { provider: string; modelId: string };
-export type ModelEntry = { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number; maxTokens?: number };
+export type ModelEntry = { id: string; name: string; provider: string; supportsFastMode?: boolean; supportsSlowMode?: boolean; contextWindow?: number; maxTokens?: number };
 export type ModelsResponse = {
   models: Record<string, string>;
   modelList?: ModelEntry[];
@@ -364,6 +445,8 @@ export type ModelsResponse = {
   thinkingLevels?: Record<string, string[]>;
   thinkingLevelMaps?: Record<string, Record<string, string | null>>;
   modelError?: string;
+  /** omp's `providers.anthropic.slowMode` is `auto` (read fresh per request). */
+  anthropicSlowMode?: boolean;
 };
 
 export type SlashCommandsResponse = {
@@ -381,4 +464,26 @@ export function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashComm
       ? "skill"
       : "prompt";
   return { name: command.name, description: command.description, source };
+}
+
+// omp exposes only the commands its RPC prompt path can actually run. TUI-only
+// ones (`/guided-goal`, `/vibe`, `/budget`, …) never appear in `get_commands`,
+// so the client has no way to run them and sending one lands in the transcript
+// as literal prompt text with no hint that nothing happened (#167).
+//
+// Callers pass the FULL command list — including the builtins that
+// `toSlashCommandInfo` hides from the palette, which are still executed by omp
+// when typed and therefore must not warn. An empty list means the roster has
+// not arrived yet (or failed), in which case saying "unknown" would be a guess.
+export function isUnknownSlashCommand(text: string, knownNames: readonly string[]): boolean {
+  if (knownNames.length === 0) return false;
+  const match = /^\/([A-Za-z][A-Za-z0-9_-]*)/.exec(text.trim());
+  if (!match) return false;
+  const name = match[1].toLowerCase();
+  return !knownNames.some((known) => known.toLowerCase() === name);
+}
+
+/** The bare command word of a prompt that tries to invoke a slash command. */
+export function slashCommandName(text: string): string | null {
+  return /^\/([A-Za-z][A-Za-z0-9_-]*)/.exec(text.trim())?.[1] ?? null;
 }

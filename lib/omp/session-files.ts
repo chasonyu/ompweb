@@ -345,8 +345,8 @@ export function containsBlobRef(value: unknown): boolean {
 }
 
 export interface ResolveBlobOptions {
-  /** Leave blob refs inside toolResult messages unresolved (the caller is about
-   * to omit those images from the payload anyway). */
+  /** Leave blob refs inside toolResult messages unresolved (the caller turns
+   * those images into /api/media URLs instead of inlining them). */
   skipToolResultImages?: boolean;
 }
 
@@ -906,21 +906,26 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       if (entry.type === "custom_message" && getEntryUserPromptText(entry) !== undefined) parsedMessageCount++;
     }
 
-    if (!header.title && !firstMessage && size > SESSION_LIST_PREFIX_BYTES) {
+    if (!header.title && !firstMessage && size > SESSION_LIST_PREFIX_BYTES && size <= MAX_SESSION_LOAD_BYTES) {
+      // Oversized files must remain discoverable so detail routes can return 413.
       // RPC sessions may persist a large initialization notice before the user
       // message. Prefer that user's text over any assistant/developer fallback.
-      forEachFileLineSync(filePath, (line) => {
-        let entry: unknown;
-        try {
-          entry = JSON.parse(line);
-        } catch {
-          return;
-        }
-        const text = getEntryUserPromptText(entry);
-        if (!text?.trim()) return;
-        firstMessage = text;
-        return false;
-      });
+      try {
+        forEachFileLineSync(filePath, (line) => {
+          let entry: unknown;
+          try {
+            entry = JSON.parse(line);
+          } catch {
+            return;
+          }
+          const text = getEntryUserPromptText(entry);
+          if (!text?.trim()) return;
+          firstMessage = text;
+          return false;
+        });
+      } catch {
+        // The preview is optional; retain header metadata when a long line cannot be decoded.
+      }
     }
     const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content), firstMessage ? 1 : 0);
     firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
@@ -1331,4 +1336,37 @@ export function deleteSessionFileWithArtifacts(filePath: string): void {
   } catch {
     // The session file itself is already gone; artifact cleanup is best-effort.
   }
+}
+
+/**
+ * Every transcript (`*.jsonl`, any depth) in a session's artifacts directory:
+ * task subagents and their nested subagents, advisors (`__advisor*.jsonl`),
+ * `/tan` clones and extension sub-sessions. Each records its own model usage.
+ * The top-level `local/` folder is skipped: it is the agent's `local://`
+ * scratch space, which omp never writes transcripts to and which can hold
+ * arbitrary trees (cloned repos, dependencies). Returns [] without an
+ * artifacts directory.
+ */
+export function listSessionArtifactTranscripts(sessionFile: string): string[] {
+  if (!sessionFile.endsWith(".jsonl")) return [];
+  const root = sessionFile.slice(0, -".jsonl".length);
+  const transcripts: string[] = [];
+  const pending = [root];
+  for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
+    let entries: Dirent[];
+    try {
+      entries = readDirectorySyncRuntime(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (dir !== root || entry.name !== "local") pending.push(entryPath);
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        transcripts.push(entryPath);
+      }
+    }
+  }
+  return transcripts;
 }

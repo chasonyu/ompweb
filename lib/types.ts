@@ -1,5 +1,5 @@
 // Types mirrored from oh-my-pi coding-agent session-entries (v3 format).
-import type { TodoPhase } from "./pi-types";
+import type { RpcAskDialogAnswer, RpcAskDialogQuestion, TodoPhase } from "./pi-types";
 
 // omp-web cannot import the Bun-only @oh-my-pi packages, so the on-disk
 // shapes are re-declared here. Legacy pi v1/v2 fields are kept optional.
@@ -36,12 +36,15 @@ export interface TextContent {
 /**
  * Image block. omp persists the flat {data, mimeType} shape (data may be a
  * `blob:sha256:` reference until resolved); legacy pi entries used the nested
- * Anthropic-style `source` shape. The UI handles both.
+ * Anthropic-style `source` shape. The UI handles both. Tool-result images
+ * reach the browser as `url` (`/api/media/<sha256>`, `?thumb=1` for a small
+ * preview) instead of inline base64.
  */
 export interface ImageContent {
   type: "image";
   data?: string;
   mimeType?: string;
+  url?: string;
   source?: {
     type: "base64" | "url";
     media_type?: string;
@@ -71,6 +74,8 @@ export interface UserMessage {
   attribution?: "user" | "agent";
   content: string | (TextContent | ImageContent)[];
   timestamp?: number;
+  /** Rendered from a `branch_summary` entry, not a real prompt: omp cannot branch at it. */
+  branchSummary?: true;
 }
 
 export interface AssistantMessage {
@@ -109,6 +114,9 @@ export interface ToolResultMessage {
    * `tool_execution_update`), not a committed result. Rendering treats it as
    * "running" and keeps it out of the session's toolResult list. */
   partial?: boolean;
+  /** Sanitized one-line passive context omp emitted after this result's tool
+   * batch (`collectToolResults`); display-only, never part of the result. */
+  passiveContext?: string;
 }
 
 export interface CustomMessage {
@@ -210,6 +218,16 @@ export type ExtensionUiRequest =
       method: "editor";
       title: string;
       prefill?: string;
+      /** omp sets this for plain-text answers (ask "Other"); render as prose, not code. */
+      promptStyle?: boolean;
+      timeout?: number;
+      expiresAt?: number;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
+      method: "ask";
+      questions: RpcAskDialogQuestion[];
       timeout?: number;
       expiresAt?: number;
     }
@@ -258,7 +276,8 @@ export type ExtensionUiRequest =
 export type ExtensionUiResponse =
   | { type: "extension_ui_response"; id: string; value: string }
   | { type: "extension_ui_response"; id: string; confirmed: boolean }
-  | { type: "extension_ui_response"; id: string; cancelled: true };
+  | { type: "extension_ui_response"; id: string; cancelled: true }
+  | { type: "extension_ui_response"; id: string; answers: RpcAskDialogAnswer[] };
 
 export interface ExtensionStatusItem {
   key: string;
@@ -486,4 +505,23 @@ export interface SessionContext {
   model: { provider: string; modelId: string } | null;
   /** Latest persisted todo snapshot on the selected session branch. */
   todoPhases: TodoPhase[];
+}
+
+/** An omp child that exited unexpectedly; retained until that session starts again. */
+/** A host tool call for a session no tab is watching, sent to every open tab. */
+export interface CrossSessionHostToolCall {
+  sessionId: string;
+  id: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ExitedRpcSession {
+  id: string;
+  cwd: string;
+  at: number;
+  code: number | null;
+  signal: string | null;
+  /** Last stderr line, if any. */
+  detail: string;
 }

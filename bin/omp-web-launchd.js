@@ -15,6 +15,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const path = require("node:path");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { resolvePasswordHash } = require("./omp-web-hash-password");
 
 const LABEL = "com.kahme247.ompweb";
 const HOME = os.homedir();
@@ -76,7 +78,16 @@ function install(pkgArg) {
   const port = process.env.PORT ?? "30177";
   const hostname = process.env.OMP_WEB_HOSTNAME ?? "127.0.0.1";
   const noOpen = process.env.OMP_WEB_NO_OPEN ?? "1";
-  const password = process.env.OMP_WEB_PASSWORD;
+  const disableAutoUpdate = process.env.OMP_WEB_DISABLE_AUTOUPDATE;
+  const installName = process.env.OMP_WEB_NAME;
+  // Only a hash is stored in the plist: omp-web never reads a plaintext
+  // password, and `OMP_WEB_PASSWORD` set for this install is hashed here.
+  let passwordHash;
+  try {
+    passwordHash = resolvePasswordHash();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
   const agentDir = process.env.PI_CODING_AGENT_DIR?.replace(/^~(?=\/|$)/, HOME);
 
   const asdfBin = which("asdf");
@@ -96,7 +107,9 @@ function install(pkgArg) {
     PORT: port,
     OMP_WEB_HOSTNAME: hostname,
     OMP_WEB_NO_OPEN: noOpen,
-    ...(password ? { OMP_WEB_PASSWORD: password } : {}),
+    ...(disableAutoUpdate ? { OMP_WEB_DISABLE_AUTOUPDATE: disableAutoUpdate } : {}),
+    ...(installName ? { OMP_WEB_NAME: installName } : {}),
+    ...(passwordHash ? { OMP_WEB_PASSWORD_HASH: passwordHash } : {}),
     ...(ompBin ? { OMP_WEB_OMP_BIN: ompBin } : {}),
     ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}),
   };
@@ -140,7 +153,7 @@ ${envXml}
   console.log(`package:   ${pkg} (via npx --yes)`);
   console.log(`url:       http://${hostname}:${port}`);
   console.log(`logs:      ${path.join(LOG_DIR, "ompweb.log")}`);
-  if (password) console.log("note:      password is stored in plain text in the plist (mode 600)");
+  if (passwordHash) console.log("note:      the password hash is stored in the plist (mode 600)");
 }
 
 function uninstall() {

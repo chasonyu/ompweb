@@ -205,3 +205,44 @@ test("zero context tokens never print a null gauge", () => {
   assert.match(html, /read/);
 });
 
+test("completed subagents nest under a collapsed Completed group", () => {
+  // Roster expanded from storage, as after a user opened it; the completed
+  // group itself must still start collapsed.
+  globalThis.window = { localStorage: { getItem: () => "false", setItem: () => {} } };
+  try {
+    const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+      todoPhases: [],
+      subagents: [
+        { id: "s1", agent: "scout", status: "started", task: "Map the surface", index: 0 },
+        { id: "s2", agent: "worker", status: "completed", task: "Write the code", index: 1 },
+        { id: "s3", agent: "worker", status: "failed", task: "Break the build", index: 2 },
+        { id: "s4", agent: "scout", status: "started", task: "Old snapshot", index: 3, source: "history" },
+      ],
+      onSelectSubagent: noop,
+    }));
+    assert.match(html, /Map the surface/);
+    assert.match(html, /Completed \(3\)/);
+    assert.match(html, /aria-expanded="false"/);
+    assert.doesNotMatch(html, /Write the code/);
+    assert.doesNotMatch(html, /Break the build/);
+    assert.doesNotMatch(html, /Old snapshot/);
+  } finally {
+    delete globalThis.window;
+  }
+});
+
+test("a side question keeps Copy for the earlier answer when its follow-up ended without text", () => {
+  const record = {
+    id: "b1", leafId: null, question: "what is 2+2", answer: "It is 4.", status: "complete", createdAt: 1, updatedAt: 2,
+    followUps: [{ question: "and 3+3?", answer: "", status: "cancelled", createdAt: 3, updatedAt: 4 }],
+  };
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [],
+    subagents: [],
+    onSelectSubagent: noop,
+    btw: { record, onCancel: noop, onFollowUp: async () => true, onClose: noop },
+  }));
+  assert.match(html, /It is 4\./);
+  assert.match(html, /Cancelled/);
+  assert.match(html, />Copy answer</);
+});

@@ -1,9 +1,12 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
-import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuringRunBehavior } from "@/lib/composer-prefs";
+import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
-import { ArrowLeft, Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
+import { COMPACTION_METHODS, DEFAULT_COMPACTION_METHOD_ORDER, type CompactionMethod } from "@/lib/compaction-methods";
+import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from "@/lib/omp/agent-env-policy";
+import { isRecord } from "@/lib/type-guards";
 import { Alert } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
@@ -13,10 +16,22 @@ import { copyText } from "@/lib/clipboard";
 import type { AppUpdateInfo } from "./AppUpdateDialog";
 import { useFontSize, type FontSizePreference } from "@/hooks/useFontSize";
 import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
+import { useTouchTargets, type TouchTargetsPreference } from "@/hooks/useTouchTargets";
 import { useSpeechSynthesis } from "@/hooks/useSpeechSynthesis";
+import { useNotificationPrefs } from "@/hooks/useNotifications";
+import { NOTIFICATION_TYPES, renderNotification, type NotificationType } from "@/lib/notification-events";
+import {
+  ensurePushSubscription,
+  getNotificationDeviceId,
+  getNotificationPrefs,
+  getNotificationSupport,
+  showSystemNotification,
+  updateNotificationPrefs,
+  type NotificationSupport,
+} from "@/lib/notification-client";
 const SettingsTabLoading = () => {
   const { t } = useI18n();
-  return <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.loadingSettings")}</div>;
+  return <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{t("settingsConfig.loadingSettings")}</div>;
 };
 const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading, ssr: false });
 const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig), { loading: SettingsTabLoading, ssr: false });
@@ -45,28 +60,35 @@ type WindowsServiceStatus = {
 
 type NativeSettings = {
   defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  providers?: { autoThinkingSource?: "classifier" | "vendor" };
   hideThinkingBlock?: boolean;
   externalThinking?: boolean;
   textVerbosity?: "low" | "medium" | "high";
   personality?: "default" | "friendly" | "pragmatic" | "none";
   advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
   tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
-  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; strategy?: "snapcompact" | "handoff" | "context-full" | "shake" | "off"; autoContinue?: boolean; remoteEnabled?: boolean; keepRecentTokens?: number };
+  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
   memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
+  skills?: { showStartupDiagnostics?: boolean };
   retry?: { enabled?: boolean; maxRetries?: number; modelFallback?: boolean };
 };
 
 const nativeSelectStyle = {
-  minHeight: 32,
-  padding: "4px 28px 4px 10px",
+  minHeight: "var(--control-height)",
+  padding: "4px 28px 4px var(--control-padding-inline)",
   border: "1px solid var(--border)",
   borderRadius: "var(--radius-control)",
   background: "var(--bg)",
   color: "var(--text)",
-  fontSize: 12,
+  fontSize: "var(--text-sm)",
+  maxWidth: "100%",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontFamily: "inherit",
   cursor: "pointer",
   appearance: "none" as const,
   WebkitAppearance: "none" as const,
@@ -81,6 +103,8 @@ const nativeSelectStyle = {
 const nativeOptionStyle = {
   background: "var(--bg-panel)",
   color: "var(--text)",
+  fontFamily: "inherit",
+  fontSize: 12,
 } as const;
 
 const chipStyle = {
@@ -129,29 +153,35 @@ type SettingIndexEntry = {
 
 const SETTING_INDEX: SettingIndexEntry[] = [
   // Interface & Behavior
+  { id: "skill-startup-notices", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.skillStartupNotices", descKey: "settingsConfig.skillStartupNoticesDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Skill startup notices", fallbackDesc: "Show conflicts and redundant skill copies when an OMP session starts.", scope: "Native OMP" },
   { id: "completion-sound", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.completionSound", descKey: "settingsConfig.completionSoundDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Completion sound", fallbackDesc: "Play a tone when the agent completes a run.", scope: "UI" },
   { id: "keep-tool-calls-collapsed", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.keepToolCallsCollapsed", descKey: "settingsConfig.keepToolCallsCollapsedDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Keep tool calls collapsed", fallbackDesc: "Show only compact headers while tools execute.", scope: "UI" },
+  { id: "expand-thinking-by-default", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.expandThinkingByDefault", descKey: "settingsConfig.expandThinkingByDefaultDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Expand thinking blocks by default", fallbackDesc: "Open every thinking block as it appears, including while it streams, so reasoning is readable without clicking each one. Collapsing a block by hand still works.", scope: "UI" },
+  { id: "open-url-automatically", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.openUrlAutomatically", descKey: "settingsConfig.openUrlAutomaticallyDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Open agent links without asking", fallbackDesc: "Links the agent opens from the session you are viewing open in a new tab right away. Links from other sessions always ask first. Your browser may still block pop-ups.", scope: "UI" },
   { id: "scope-native-select-all", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.scopeNativeSelectAll", descKey: "settingsConfig.scopeNativeSelectAllDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Scope native Select All (experimental)", fallbackDesc: "Limit whole-page selections from browser or touch menus to the active message, chat, or file. May also narrow deliberate whole-page selections. Turn off if selection handles or menus misbehave. Keyboard shortcuts are unaffected.", scope: "UI" },
   { id: "tts-autoplay", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.ttsAutoplay", descKey: "settingsConfig.ttsAutoplayDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Auto-read assistant responses", fallbackDesc: "Automatically read aloud new assistant replies when completed.", scope: "UI" },
   { id: "tts-voice", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.ttsVoice", descKey: "settingsConfig.ttsVoiceDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Speech Voice", fallbackDesc: "Select the browser voice for text-to-speech reading.", scope: "UI" },
   { id: "provider-usage", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.providerUsage", descKey: "settingsConfig.providerUsageDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Provider usage limits", fallbackDesc: "Show provider usage in the sidebar, above Settings.", scope: "UI" },
   { id: "chat-font-size", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.chatFontSize", descKey: "settingsConfig.chatFontSizeDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Chat Font Size", fallbackDesc: "Adjust text size for conversation messages, code blocks, and markdown output.", scope: "UI" },
   { id: "ui-scale", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.uiScale", descKey: "settingsConfig.uiScaleDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Interface Scale", fallbackDesc: "Adjust overall UI zoom and display density across sidebars, dialogs, buttons, and toolbars.", scope: "UI" },
+  { id: "touch-targets", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.touchTargets", descKey: "settingsConfig.touchTargetsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Touch Targets", fallbackDesc: "Adjust interactive target sizes for buttons and toolbar controls.", scope: "UI" },
   { id: "message-during-active-run", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.messageDuringActiveRun", descKey: "settingsConfig.messageDuringActiveRunDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Message during active run", fallbackDesc: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
+  { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
   // Tool Safety & Approvals
   { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
   { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
   { id: "extension-tool-requests", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.extensionToolRequests", descKey: "settingsConfig.extensionToolRequestsDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Extension Tool Requests", fallbackDesc: "Automatically approve extension tool authorization requests.", scope: "Native OMP" },
   // AI Model Defaults
   { id: "reasoning", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.reasoning", descKey: "settingsConfig.reasoningDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Reasoning", fallbackDesc: "Default effort level for thinking-capable models.", scope: "Native OMP" },
+  { id: "auto-thinking-source", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.autoThinkingSource", descKey: "settingsConfig.autoThinkingSourceDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Auto Thinking Source", fallbackDesc: "Choose prompt classification or the publisher default with omp fallback.", scope: "Native OMP" },
   { id: "verbosity", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.verbosity", descKey: "settingsConfig.verbosityDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Verbosity", fallbackDesc: "Response detail level for supporting providers.", scope: "Native OMP" },
   { id: "personality", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.personality", descKey: "settingsConfig.personalityDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Personality", fallbackDesc: "Style included in OMP's system prompt.", scope: "Native OMP" },
-  { id: "thinking-blocks", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.thinkingBlocks", descKey: "settingsConfig.thinkingBlocksDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Thinking Blocks", fallbackDesc: "Hide model reasoning from output view.", scope: "Native OMP" },
+  { id: "thinking-blocks", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.thinkingBlocks", descKey: "settingsConfig.thinkingBlocksDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Hide Thinking Blocks", fallbackDesc: "Hide model reasoning from output view.", scope: "Native OMP" },
   { id: "external-thinking", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.externalThinking", descKey: "settingsConfig.externalThinkingDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "External Thinking", fallbackDesc: "Private scratchpad reasoning via think tool.", scope: "Native OMP" },
   // Context Compaction
   { id: "automatic-compaction", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.automaticCompaction", descKey: "settingsConfig.automaticCompactionDesc", fallbackSection: "Context Compaction", fallbackLabel: "Automatic Compaction", fallbackDesc: "Compact context before model context limit is hit.", scope: "Native OMP" },
   { id: "continue-after-compaction", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.continueAfterCompaction", descKey: "settingsConfig.continueAfterCompactionDesc", fallbackSection: "Context Compaction", fallbackLabel: "Continue After Compaction", fallbackDesc: "Resume task execution after compaction completes.", scope: "Native OMP" },
-  { id: "maintenance-strategy", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.maintenanceStrategy", descKey: "settingsConfig.maintenanceStrategyDesc", fallbackSection: "Context Compaction", fallbackLabel: "Maintenance Strategy", fallbackDesc: "Select algorithm used to reduce context pressure.", scope: "Native OMP" },
+  { id: "compaction-method-order", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.compactionMethodOrder", descKey: "settingsConfig.compactionMethodOrderDesc", fallbackSection: "Context Compaction", fallbackLabel: "Compaction Method Order", fallbackDesc: "Preferred fallback order for automatic context maintenance; unavailable or failed methods advance to the next choice.", scope: "Native OMP" },
   { id: "compact-mid-turn", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.compactMidTurn", descKey: "settingsConfig.compactMidTurnDesc", fallbackSection: "Context Compaction", fallbackLabel: "Compact Mid-Turn", fallbackDesc: "Check context limits between tool execution steps.", scope: "Native OMP" },
   // Memory & Auto-Learn
   { id: "memory-backend", tab: "intelligence", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.memoryBackend", descKey: "settingsConfig.memoryBackendDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Memory Backend", fallbackDesc: "Where durable knowledge is stored across sessions.", scope: "Native OMP" },
@@ -178,8 +208,17 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "cache-savings", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.cacheSavings", descKey: "usageConfig.costQuality", fallbackSection: "Usage", fallbackLabel: "Cache Savings", fallbackDesc: "Prompt caching savings and cost quality breakdown", scope: "UI" },
   { id: "model-breakdown", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.breakdown", descKey: "usageConfig.model", fallbackSection: "Usage", fallbackLabel: "Model Breakdown", fallbackDesc: "Historical token usage and cost per model, day, and project", scope: "UI" },
   // Windows Background Service & System Tray
+  { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System & Updates", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
+  { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
   { id: "windows-service-shortcuts", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceInstallBtn", descKey: "settingsConfig.windowsServiceDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Install Service & Shortcuts", fallbackDesc: "Manage background service execution, system tray monitor, Windows logon autostart, and Desktop shortcuts.", scope: "UI" },
+  // Notifications
+  { id: "notifications-enable", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.enable", descKey: "notifications.enableDesc", fallbackSection: "Notifications", fallbackLabel: "Enable notifications", fallbackDesc: "Asks the browser for permission to show notifications.", scope: "UI" },
+  { id: "notifications-completed", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeCompleted", descKey: "notifications.typeCompletedDesc", fallbackSection: "Notifications", fallbackLabel: "Task finished", fallbackDesc: "A prompt and the background work it started are done. Subagents never notify.", scope: "UI" },
+  { id: "notifications-input", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeInput", descKey: "notifications.typeInputDesc", fallbackSection: "Notifications", fallbackLabel: "Waiting for input", fallbackDesc: "The agent asks a question or needs an approval.", scope: "UI" },
+  { id: "notifications-error", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeError", descKey: "notifications.typeErrorDesc", fallbackSection: "Notifications", fallbackLabel: "Run failed", fallbackDesc: "A run stops with an error after retries and fallbacks, or the omp process exits.", scope: "UI" },
+  { id: "notifications-modelSwitch", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeModelSwitch", descKey: "notifications.typeModelSwitchDesc", fallbackSection: "Notifications", fallbackLabel: "Model switched automatically", fallbackDesc: "omp switches models on its own: a fallback after a refusal, rate limit, or usage limit, or a prewalk / plan hand-off.", scope: "UI" },
+  { id: "notifications-when-active", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.whenActive", descKey: "notifications.whenActiveDesc", fallbackSection: "Notifications", fallbackLabel: "When I'm using omp-web in another tab", fallbackDesc: "Nothing is shown for the session you are viewing.", scope: "UI" },
 ];
 
 function SearchResultsList({ results, query, onSelect }: { results: SearchResult[]; query: string; onSelect: (result: SearchResult) => void }) {
@@ -195,7 +234,7 @@ function SearchResultsList({ results, query, onSelect }: { results: SearchResult
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--bg)", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
       <div className="settings-panel-inner" style={{ gap: 12 }}>
-        <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 4 }}>
+        <div style={{ fontSize: "var(--text-md)", color: "var(--text-muted)", marginBottom: 4 }}>
           {results.length === 0 ? t("settingsConfig.noSettingsMatch", { query }) : tn("settingsConfig.searchResults", results.length, { count: results.length, query })}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
@@ -226,7 +265,7 @@ function SearchResultsList({ results, query, onSelect }: { results: SearchResult
                   <span style={chipStyle}>{formatScope(result.scope)}</span>
                 )}
               </div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.45 }}>{result.description}</div>
+              <div style={{ fontSize: "var(--text-sm)", color: "var(--text-muted)", lineHeight: 1.45 }}>{result.description}</div>
               {result.section && <div style={{ fontSize: 10.5, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{result.section}</div>}
             </button>
           ))}
@@ -269,33 +308,345 @@ function ToggleSwitch({
         position: "relative",
         display: "inline-flex",
         alignItems: "center",
-        width: 40,
-        height: 24,
-        borderRadius: 12,
+        justifyContent: "center",
+        width: 44,
+        height: 44,
+        padding: 0,
         border: "none",
-        background: checked ? "var(--accent-strong)" : "var(--border)",
+        background: "transparent",
         cursor: disabled ? "not-allowed" : "pointer",
-        transition: "background var(--dur-fast)",
-        padding: 2,
         flexShrink: 0,
       }}
     >
       <span
+        aria-hidden="true"
         style={{
-          width: 20,
-          height: 20,
-          borderRadius: 10,
-          background: "#fff",
-          transform: checked ? "translateX(16px)" : "translateX(0px)",
-          transition: "transform var(--dur-fast)",
-          boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+          display: "inline-flex",
+          alignItems: "center",
+          width: 40,
+          height: 24,
+          padding: 2,
+          borderRadius: 12,
+          background: checked ? "var(--accent-strong)" : "var(--border)",
+          transition: "background var(--dur-fast)",
         }}
-      />
+      >
+        <span
+          style={{
+            width: 20,
+            height: 20,
+            borderRadius: 10,
+            background: "#fff",
+            transform: checked ? "translateX(16px)" : "translateX(0px)",
+            transition: "transform var(--dur-fast)",
+            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+          }}
+        />
+      </span>
     </button>
   );
 }
 
-function NativeSetting({ label, description, scope, searchId, children }: { label: string; description: string; scope?: "UI" | "Native OMP" | "Workspace"; searchId?: string; children: ReactNode }) {
+/** Server-side omp-web setting (lib/web-settings.ts), loaded on mount. */
+function AutoResumeSessionsSetting() {
+  const { t } = useI18n();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/web-settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { autoResumeSessions?: boolean } | null) => { if (alive) setEnabled(data?.autoResumeSessions === true); })
+      .catch(() => { if (alive) setEnabled(false); });
+    return () => { alive = false; };
+  }, []);
+  const change = async (next: boolean) => {
+    const previous = enabled;
+    setEnabled(next);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoResumeSessions: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      setEnabled(previous);
+      toast.error(t("settingsConfig.autoResumeSessionsSaveFailed"), error instanceof Error ? error.message : String(error));
+    }
+  };
+  return (
+    <NativeSetting searchId="auto-resume-sessions" label={t("settingsConfig.autoResumeSessions")} description={t("settingsConfig.autoResumeSessionsDesc")}>
+      <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+    </NativeSetting>
+  );
+}
+
+/** Server-side omp-web setting (issue #104): KEY=VALUE text injected into the
+ * `omp` child process. Parsing/validation lives in lib/omp/agent-env.ts; this only
+ * feeds it localized messages and renders the result. */
+function AgentEnvSetting() {
+  const { t } = useI18n();
+  const [text, setText] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const errorLabels = useMemo<AgentEnvErrorLabels>(
+    () => ({
+      missingSeparator: (line) => t("settingsConfig.agentEnvErrMissingSeparator", { line }),
+      emptyName: (line) => t("settingsConfig.agentEnvErrEmptyName", { line }),
+      invalidName: (line, name) => t("settingsConfig.agentEnvErrInvalidName", { line, name }),
+      deniedName: (line, name) => t("settingsConfig.agentEnvErrDenied", { line, name }),
+    }),
+    [t],
+  );
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/web-settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { agentEnv?: Record<string, string> } | null) => {
+        if (!alive) return;
+        setText(formatAgentEnvText(isRecord(data?.agentEnv) ? data.agentEnv : {}));
+        setLoaded(true);
+      })
+      .catch(() => { if (alive) setLoaded(true); });
+    return () => { alive = false; };
+  }, []);
+
+  const { errors } = useMemo(() => parseAgentEnvText(text, errorLabels), [text, errorLabels]);
+
+  const save = async () => {
+    if (errors.length > 0) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentEnv: text }),
+      });
+      const data = (await res.json().catch(() => null)) as { agentEnv?: Record<string, string>; errors?: string[] } | null;
+      if (!res.ok) {
+        throw new Error(
+          data?.errors?.length
+            ? data.errors.join("\n")
+            : data && typeof data === "object" && "error" in data && typeof data.error === "string"
+              ? data.error
+              : `HTTP ${res.status}`,
+        );
+      }
+      // Re-render from the server's canonical form so the textarea matches what is stored.
+      setText(formatAgentEnvText(isRecord(data?.agentEnv) ? data.agentEnv : {}));
+      toast.success(t("settingsConfig.agentEnvSaved"));
+    } catch (error) {
+      toast.error(t("settingsConfig.agentEnvSaveFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <NativeSetting searchId="agent-env" scope="UI" label={t("settingsConfig.agentEnv")} description={t("settingsConfig.agentEnvDesc")}>
+      <div className="settings-card-block" style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", minWidth: 0 }}>
+        <textarea
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          spellCheck={false}
+          rows={5}
+          disabled={!loaded}
+          placeholder={t("settingsConfig.agentEnvPlaceholder")}
+          aria-label={t("settingsConfig.agentEnv")}
+          aria-invalid={errors.length > 0 || undefined}
+          aria-describedby="agent-env-note"
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            padding: "7px 9px",
+            border: `1px solid ${errors.length > 0 ? "var(--status-error)" : "var(--border)"}`,
+            borderRadius: "var(--radius-control)",
+            background: "var(--bg)",
+            color: "var(--text)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            lineHeight: 1.45,
+            minHeight: 96,
+            fieldSizing: "content",
+            resize: "vertical",
+            outline: "none",
+          }}
+        />
+        {errors.length > 0 && (
+          <ul role="alert" aria-label={t("settingsConfig.agentEnvErrors")} style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 2 }}>
+            {errors.map((error) => (
+              <li key={error} style={{ fontSize: 11, color: "var(--status-error)", lineHeight: 1.4, overflowWrap: "anywhere" }}>{error}</li>
+            ))}
+          </ul>
+        )}
+        <p id="agent-env-note" style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("settingsConfig.agentEnvNote")}</p>
+        <div>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={saving || !loaded || errors.length > 0}
+            style={{
+              padding: "6px 14px",
+              border: "1px solid var(--accent-strong)",
+              borderRadius: "var(--radius-control)",
+              background: "var(--accent-strong)",
+              color: "var(--on-accent)",
+              cursor: saving || errors.length > 0 ? "not-allowed" : "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              opacity: saving || !loaded || errors.length > 0 ? 0.6 : 1,
+            }}
+          >
+            {saving ? t("settingsConfig.agentEnvSaving") : t("settingsConfig.agentEnvSave")}
+          </button>
+        </div>
+      </div>
+    </NativeSetting>
+  );
+}
+
+const NOTIFICATION_TYPE_LABELS: Record<NotificationType, { label: string; desc: string }> = {
+  completed: { label: "notifications.typeCompleted", desc: "notifications.typeCompletedDesc" },
+  input: { label: "notifications.typeInput", desc: "notifications.typeInputDesc" },
+  error: { label: "notifications.typeError", desc: "notifications.typeErrorDesc" },
+  modelSwitch: { label: "notifications.typeModelSwitch", desc: "notifications.typeModelSwitchDesc" },
+};
+
+const NOTIFICATION_STATUS_KEYS: Record<Exclude<NotificationSupport, "push" | "no-push">, string> = {
+  insecure: "notifications.statusInsecure",
+  "ios-install": "notifications.statusIosInstall",
+  unsupported: "notifications.statusUnsupported",
+  denied: "notifications.statusDenied",
+};
+
+/** Per-device notification prefs (lib/notification-client.ts), mirrored to the server. */
+function NotificationSettingsPanel() {
+  const { t, locale } = useI18n();
+  const prefs = useNotificationPrefs();
+  const [support, setSupport] = useState<NotificationSupport | null>(null);
+  const [pushActive, setPushActive] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setSupport(getNotificationSupport());
+    // Enabled: join (or redo) the app's startup repair, which is single-flight,
+    // so the status reflects the subscription after any repair, not before it.
+    const pushState: Promise<boolean> = getNotificationPrefs().enabled
+      ? ensurePushSubscription()
+      : fetch(`/api/notifications/devices?deviceId=${encodeURIComponent(getNotificationDeviceId())}`)
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data: { subscribed?: boolean } | null) => data?.subscribed === true);
+    pushState.then((active) => { if (alive) setPushActive(active); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+  const save = (patch: Parameters<typeof updateNotificationPrefs>[0]) => {
+    void updateNotificationPrefs(patch).catch((error: unknown) => toast.error(t("notifications.saveFailed"), errorText(error)));
+  };
+
+  const setEnabled = async (enabled: boolean) => {
+    setBusy(true);
+    try {
+      // First await inside the click: Safari only prompts during the user gesture.
+      if (enabled && "Notification" in window && Notification.permission === "default") await Notification.requestPermission();
+      await updateNotificationPrefs({ enabled, locale });
+      if (enabled) setPushActive(await ensurePushSubscription());
+    } catch (error) {
+      toast.error(t("notifications.enableFailed", { error: errorText(error) }));
+    } finally {
+      setSupport(getNotificationSupport());
+      setBusy(false);
+    }
+  };
+
+  // With push, the server sends a real push; otherwise this tab shows one itself.
+  const sendTest = async () => {
+    const testNotification = renderNotification({ type: "test", sessionId: "", sessionName: "omp web" }, t);
+    try {
+      if (pushActive) {
+        const res = await fetch("/api/notifications/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deviceId: getNotificationDeviceId() }),
+        });
+        if (!res.ok) {
+          const body: unknown = await res.json().catch(() => null);
+          // The server drops a subscription the push service reports gone;
+          // resubscribe so the next test (and real pushes) can reach this device.
+          setPushActive(await ensurePushSubscription().catch(() => false));
+          throw new Error(isRecord(body) && typeof body.error === "string" ? body.error : `HTTP ${res.status}`);
+        }
+      } else if (!(await showSystemNotification(testNotification))) {
+        // No system notifications here (plain HTTP, permission missing): in-app toasts are what this browser gets.
+        toast.info(testNotification.title, testNotification.body);
+        return;
+      }
+      toast.success(t("notifications.testSent"));
+    } catch (error) {
+      toast.error(t("notifications.testFailed"), errorText(error));
+    }
+  };
+
+  let status: string | null = null;
+  if (support && support !== "push" && support !== "no-push") status = t(NOTIFICATION_STATUS_KEYS[support]);
+  else if (support && prefs.enabled) {
+    if (Notification.permission !== "granted") status = t("notifications.statusPermission");
+    else status = t(pushActive ? "notifications.statusPush" : "notifications.statusInPage");
+  }
+
+  return (
+    <>
+      <NativeSetting searchId="notifications-enable" scope="UI" label={t("notifications.enable")} description={t("notifications.enableDesc")}>
+        <ToggleSwitch checked={prefs.enabled} disabled={busy} onChange={(next) => void setEnabled(next)} />
+      </NativeSetting>
+      {status && <Alert variant={support === "push" || support === "no-push" ? "info" : "warning"} description={status} />}
+      {NOTIFICATION_TYPES.map((type) => (
+        <NativeSetting key={type} searchId={`notifications-${type}`} scope="UI" disabled={!prefs.enabled} label={t(NOTIFICATION_TYPE_LABELS[type].label)} description={t(NOTIFICATION_TYPE_LABELS[type].desc)}>
+          <ToggleSwitch checked={prefs.types[type]} disabled={!prefs.enabled} onChange={(next) => save({ types: { ...prefs.types, [type]: next } })} />
+        </NativeSetting>
+      ))}
+      <NativeSetting searchId="notifications-when-active" scope="UI" disabled={!prefs.enabled} label={t("notifications.whenActive")} description={t("notifications.whenActiveDesc")}>
+        <select
+          style={nativeSelectStyle}
+          value={prefs.whenActive}
+          disabled={!prefs.enabled}
+          onChange={(event) => save({ whenActive: event.target.value === "system" ? "system" : "toast" })}
+        >
+          <option value="toast" style={nativeOptionStyle}>{t("notifications.whenActiveToast")}</option>
+          <option value="system" style={nativeOptionStyle}>{t("notifications.whenActiveSystem")}</option>
+        </select>
+      </NativeSetting>
+      <div>
+        <button
+          type="button"
+          onClick={() => void sendTest()}
+          disabled={!prefs.enabled}
+          style={{
+            padding: "6px 14px",
+            border: "1px solid var(--accent-strong)",
+            borderRadius: "var(--radius-control)",
+            background: "var(--accent-strong)",
+            color: "var(--on-accent)",
+            cursor: prefs.enabled ? "pointer" : "not-allowed",
+            fontSize: 12,
+            fontWeight: 600,
+            opacity: prefs.enabled ? 1 : 0.6,
+          }}
+        >
+          {t("notifications.test")}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** `disabled` only dims the row; the child control must be disabled itself. */
+function NativeSetting({ label, description, scope, searchId, disabled, children }: { label: string; description: string; scope?: "UI" | "Native OMP" | "Workspace"; searchId?: string; disabled?: boolean; children: ReactNode }) {
   const { t } = useI18n();
   const ref = useRef<HTMLDivElement>(null);
   const highlightId = useContext(SettingsHighlightContext);
@@ -339,13 +690,14 @@ function NativeSetting({ label, description, scope, searchId, children }: { labe
         width: "100%",
         boxSizing: "border-box",
         marginBottom: 10,
-        transition: "box-shadow var(--dur-fast), border-color var(--dur-fast)",
+        opacity: disabled ? 0.5 : 1,
+        transition: "box-shadow var(--dur-fast), border-color var(--dur-fast), opacity var(--dur-fast)",
         ...(highlighted ? { borderColor: "var(--accent)", boxShadow: "0 0 0 2px var(--accent)" } : {}),
       }}
     >
       <div className="settings-card-text">
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-          <label id={labelId} htmlFor={settingId} className="settings-card-title" style={{ cursor: "pointer" }}>{label}</label>
+          <label id={labelId} htmlFor={settingId} className="settings-card-title" style={{ cursor: disabled ? "default" : "pointer" }}>{label}</label>
           {scope && (
             <span style={chipStyle}>
               {formatScope(scope)}
@@ -354,25 +706,92 @@ function NativeSetting({ label, description, scope, searchId, children }: { labe
         </div>
         <span id={descId} className="settings-card-desc">{description}</span>
       </div>
-      <span style={{ flexShrink: 0 }}>{enhancedChild}</span>
+      <span className="settings-card-control">{enhancedChild}</span>
     </div>
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
+/** Mirrors omp's ordered multi-select (`compaction.methodOrder`): checked methods run in
+ * their numbered order, unchecked ones are skipped; none checked disables automatic compaction. */
+function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly CompactionMethod[]; onChange: (next: CompactionMethod[]) => void } & EnhancedChildProps) {
+  const { t } = useI18n();
+  const groupRef = useRef<HTMLDivElement>(null);
+  // The moved row is re-inserted in the DOM once the save lands, which drops focus.
+  const refocusRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!refocusRef.current) return;
+    groupRef.current?.querySelector<HTMLButtonElement>(`[data-move="${refocusRef.current}"]`)?.focus();
+    refocusRef.current = null;
+  }, [value]);
+  const rows = [...value, ...COMPACTION_METHODS.filter((method) => !value.includes(method))];
+  const move = (method: CompactionMethod, delta: -1 | 1) => {
+    const index = value.indexOf(method);
+    if (index === -1 || !value[index + delta]) return;
+    const next = [...value];
+    [next[index], next[index + delta]] = [next[index + delta], next[index]];
+    refocusRef.current = `${method}:${delta}`;
+    onChange(next);
+  };
+  return (
+    <div ref={groupRef} role="group" className="compaction-method-order" {...aria}>
+      {rows.map((method) => {
+        const position = value.indexOf(method);
+        const label = t(`settingsConfig.compactionMethod.${method}`);
+        const description = t(`settingsConfig.compactionMethod.${method}Desc`);
+        const descId = `compaction-method-desc-${method}`;
+        const moveButton = (delta: -1 | 1) => {
+          const name = t(delta < 0 ? "settingsConfig.moveCompactionMethodUp" : "settingsConfig.moveCompactionMethodDown", { method: label });
+          const unavailable = position === -1 || !value[position + delta];
+          return (
+            <button type="button" data-move={`${method}:${delta}`} aria-disabled={unavailable} onClick={() => move(method, delta)} title={name} aria-label={name} className="ui-focus-ring">
+              {delta < 0 ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+            </button>
+          );
+        };
+        return (
+          <div key={method} title={description} className="compaction-method-row" data-selected={position !== -1}>
+            <label>
+              <input
+                type="checkbox"
+                checked={position !== -1}
+                aria-label={position === -1 ? label : t("settingsConfig.compactionMethodPosition", { method: label, position: position + 1 })}
+                aria-describedby={descId}
+                onChange={(event) => onChange(event.target.checked ? [...value, method] : value.filter((item) => item !== method))}
+              />
+              <span aria-hidden="true" className="compaction-method-position">{position === -1 ? "" : `${position + 1}.`}</span>
+              <span>{label}</span>
+              <span id={descId} hidden>{description}</span>
+            </label>
+            {moveButton(-1)}
+            {moveButton(1)}
+          </div>
+        );
+      })}
+      <span role="status" className="settings-card-desc">{value.length === 0 ? t("settingsConfig.compactionMethodsNone") : ""}</span>
+    </div>
+  );
+}
+
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
+  expandThinkingByDefault: boolean;
+  onExpandThinkingByDefaultChange: (expand: boolean) => void;
+  onHideThinkingBlockChange?: (hide: boolean) => void;
   providerUsageVisible: boolean;
   onProviderUsageVisibleChange: (visible: boolean) => void;
   scopeNativeSelectAll: boolean;
   onScopeNativeSelectAllChange: (enabled: boolean) => void;
+  openUrlAutomatically: boolean;
+  onOpenUrlAutomaticallyChange: (enabled: boolean) => void;
   cwd: string | null;
   sessionId: string | null;
   onModelsSaved: () => void;
   onPluginsReloaded: () => void;
   appUpdate: AppUpdateInfo | null;
   ompUpdateAvailable?: boolean;
+  ompUpdatesDisabled?: boolean;
   onRefreshAppUpdate: (force?: boolean) => Promise<AppUpdateInfo | null>;
   onOmpUpdateAvailabilityChange: (available: boolean) => void;
   onRequestAppUpdate: () => void;
@@ -384,6 +803,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const workspaceReady = cwd !== null;
   const { fontSize, setFontSize } = useFontSize();
   const { uiScale, setUiScale } = useUiScale();
+  const { touchTargets, setTouchTargets } = useTouchTargets();
   const {
     isSupported: ttsSupported,
     autoPlayEnabled: ttsAutoPlay,
@@ -395,6 +815,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
+  const [wordCompletion, setWordCompletion] = useState<WordCompletionMode>(() => getWordCompletionMode());
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -418,6 +839,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
   const ompUpdateIsAvailable = Boolean(ompUpdateAvailable || update?.updateAvailable);
   const appUpdateIsAvailable = Boolean(appUpdate?.updateAvailable);
+  const appUpdatesDisabled = Boolean(appUpdate?.updatesDisabled);
+  const ompUpdateDisabled = ompUpdatesDisabled || Boolean(update?.updatesDisabled);
   const systemNeedsAttention = appUpdateIsAvailable || ompUpdateIsAvailable;
 
   const attentionTabs = useMemo<Partial<Record<SettingsTab, boolean | string>>>(() => {
@@ -469,20 +892,34 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
   const [nativeSettings, setNativeSettings] = useState<NativeSettings | null>(null);
   const [nativeSettingsError, setNativeSettingsError] = useState<string | null>(null);
+  const [nativeSettingsLoading, setNativeSettingsLoading] = useState(true);
   const [nativeSavesInFlight, setNativeSavesInFlight] = useState(0);
   const [isPending, startTransition] = useTransition();
   const latestNativeSettingsRef = useRef<NativeSettings | null>(null);
   const nativeSaveDrainingRef = useRef(false);
   const nativeSettingsMutatedRef = useRef(false);
 
-  useEffect(() => {
-    fetch("/api/omp-settings")
+  const loadNativeSettings = useCallback(() => {
+    nativeSettingsMutatedRef.current = false;
+    setNativeSettingsLoading(true);
+    setNativeSettingsError(null);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    fetch("/api/omp-settings", { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((data: { settings?: NativeSettings }) => {
         if (!nativeSettingsMutatedRef.current) setNativeSettings(data.settings ?? {});
       })
-      .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)));
+      .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)))
+      .finally(() => {
+        clearTimeout(timeout);
+        setNativeSettingsLoading(false);
+      });
   }, []);
+
+  useEffect(() => {
+    void loadNativeSettings();
+  }, [loadNativeSettings]);
 
   const saveNativeSettings = useCallback((next: NativeSettings) => {
     nativeSettingsMutatedRef.current = true;
@@ -523,7 +960,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
   const patchSection = useCallback(<K extends keyof NativeSettings,>(key: K, patch: Partial<NonNullable<NativeSettings[K]>>) => {
     const base = latestNativeSettingsRef.current;
-    const section = (base ?? nativeSettings?.[key] ?? {}) as object;
+    const section = ((base ?? nativeSettings)?.[key] ?? {}) as object;
     void saveNativeSettings({ ...currentSettings(), [key]: { ...section, ...patch } });
   }, [currentSettings, nativeSettings, saveNativeSettings]);
 
@@ -534,6 +971,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [nativeSettings, saveNativeSettings]);
 
   const checkForUpdate = useCallback(async (force = false) => {
+    if (ompUpdateDisabled) return;
     setChecking(true);
     setMessage(null);
     try {
@@ -547,9 +985,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     } finally {
       setChecking(false);
     }
-  }, [onOmpUpdateAvailabilityChange]);
+  }, [ompUpdateDisabled, onOmpUpdateAvailabilityChange]);
 
   const checkForAppUpdate = useCallback(async (force = false) => {
+    if (appUpdatesDisabled) return;
     setCheckingAppUpdate(true);
     setAppUpdateMessage(null);
     try {
@@ -559,7 +998,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     } finally {
       setCheckingAppUpdate(false);
     }
-  }, [onRefreshAppUpdate]);
+  }, [appUpdatesDisabled, onRefreshAppUpdate]);
 
   const restartSessions = useCallback(async () => {
     setRestarting(true);
@@ -608,7 +1047,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [ompUpdating, t, checkForUpdate, restartSessions]);
 
 
-  const currentTab = getNormalizedActive(activeTab);
+  const currentTab = activeTab === "skills" ? activeTab : getNormalizedActive(activeTab);
+  const nativeSettingsRequired = currentTab === "general" || currentTab === "safety" || currentTab === "models" || currentTab === "intelligence" || currentTab === "mcp";
   useEffect(() => {
     if (currentTab === "system") {
       void fetchWindowsServiceStatus();
@@ -616,10 +1056,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [currentTab, fetchWindowsServiceStatus]);
 
   useEffect(() => {
-    if (currentTab !== "system" || hasCheckedUpdates) return;
+    if (currentTab !== "system" || hasCheckedUpdates || ompUpdateDisabled) return;
     setHasCheckedUpdates(true);
     void checkForUpdate();
-  }, [currentTab, hasCheckedUpdates, checkForUpdate]);
+  }, [currentTab, hasCheckedUpdates, ompUpdateDisabled, checkForUpdate]);
 
   const trimmedQuery = searchQuery.trim().toLowerCase();
   const searchActive = trimmedQuery.length > 0;
@@ -640,6 +1080,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
       }
     }
     for (const setting of SETTING_INDEX) {
+      if (setting.id === "auto-thinking-source" && nativeSettings?.defaultThinkingLevel !== "auto") continue;
       const trLabel = t(setting.labelKey);
       const trDesc = t(setting.descKey);
       const trSection = t(setting.sectionKey);
@@ -652,7 +1093,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
       }
     }
     return results;
-  }, [trimmedQuery, t]);
+  }, [trimmedQuery, t, nativeSettings?.defaultThinkingLevel]);
 
   const openSearchResult = useCallback((result: SearchResult) => {
     startTransition(() => onSelectTab(result.tab));
@@ -678,8 +1119,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        const target = e.target as HTMLElement | null;
-        if (target?.tagName === "INPUT" && (target as HTMLInputElement).value) return;
+        // Keep Escape for clearing a filled field; a checkbox's DOM value is always "on".
+        const target = e.target;
+        if (target instanceof HTMLInputElement && target.type !== "checkbox" && target.value) return;
         onClose();
       }
     };
@@ -702,15 +1144,19 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             <span>{t("settingsConfig.back")}</span>
           </button>
           <span style={{ width: 1, height: 18, background: "var(--border)", opacity: 0.8 }} aria-hidden="true" />
-          <h1 style={{ fontSize: 15, margin: 0, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--text)" }}>
+          <h1 style={{ fontSize: "var(--text-lg)", margin: 0, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--text)" }}>
             {t("settingsConfig.title")}
           </h1>
           {nativeSavesInFlight > 0 ? (
-            <span style={{ fontSize: 11, color: "var(--accent)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)", display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <span className="settings-save-status" style={{ fontSize: "var(--text-xs)", color: "var(--accent)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)", display: "inline-flex", alignItems: "center", gap: 4 }}>
               <RefreshCw size={11} className="spin" aria-hidden="true" /> {t("settingsConfig.saving")}
             </span>
-          ) : (
-            <span style={{ fontSize: 11, color: "var(--text-dim)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)" }}>
+          ) : nativeSettingsLoading ? (
+            <span className="settings-save-status" style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)" }}>
+              {t("appShell.loading")}
+            </span>
+          ) : nativeSettingsError ? null : (
+            <span className="settings-save-status" style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)" }}>
               {t("settingsConfig.autoSaved")}
             </span>
           )}
@@ -737,7 +1183,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   (e.target as HTMLInputElement).blur();
                 }
               }}
-              style={{ width: "100%", height: 30, padding: "0 28px 0 30px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none" }}
+              style={{ width: "100%", height: "var(--row-height-compact)", padding: "0 28px 0 30px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: "var(--text-sm)", outline: "none" }}
             />
             {searchQuery && (
               <button
@@ -770,9 +1216,28 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             <SettingsTabs active={currentTab} onSelect={handleSelectTab} workspaceReady={workspaceReady} layout={isMobile ? "horizontal" : "vertical"} attentionTabs={attentionTabs} />
 
             <div className="settings-content" style={contentStyle}>
-            {nativeSettingsError && (
+            {nativeSettingsRequired && nativeSettingsLoading ? (
+              <div className="settings-loading-state" role="status" aria-live="polite" aria-busy="true" aria-label={t("appShell.loading")}>
+                <div className="skeleton settings-loading-row" />
+                <div className="skeleton settings-loading-row" />
+                <div className="skeleton settings-loading-row" />
+              </div>
+            ) : (
+              <>
+            {nativeSettingsRequired && nativeSettingsError && (
               <div style={{ margin: 16 }}>
                 <Alert variant="error" description={nativeSettingsError} onDismiss={() => setNativeSettingsError(null)} />
+              </div>
+            )}
+            {nativeSettingsRequired && nativeSettingsError && (
+              <div style={{ margin: "0 16px 16px", display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  type="button"
+                  onClick={() => void loadNativeSettings()}
+                  style={{ minHeight: "var(--control-height)", padding: "5px var(--control-padding-inline)", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: "var(--text-sm)", fontWeight: 600 }}
+                >
+                  {t("chatWindow.retry")}
+                </button>
               </div>
             )}
 
@@ -780,15 +1245,21 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             {currentTab === "general" && (
               <div role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
                 <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.interfaceBehavior")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.interfaceBehaviorDesc")}</p>
+                  <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.interfaceBehavior")}</h2>
+                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.interfaceBehaviorDesc")}</p>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                   <NativeSetting searchId="keep-tool-calls-collapsed" label={t("settingsConfig.keepToolCallsCollapsed")} description={t("settingsConfig.keepToolCallsCollapsedDesc")} scope="UI">
                     <ToggleSwitch checked={toolCallsDefaultCollapsed} onChange={onToolCallsDefaultCollapsedChange} />
                   </NativeSetting>
+                  <NativeSetting searchId="expand-thinking-by-default" label={t("settingsConfig.expandThinkingByDefault")} description={t("settingsConfig.expandThinkingByDefaultDesc")} scope="UI">
+                    <ToggleSwitch checked={expandThinkingByDefault} onChange={onExpandThinkingByDefaultChange} />
+                  </NativeSetting>
                   <NativeSetting searchId="scope-native-select-all" label={t("settingsConfig.scopeNativeSelectAll")} description={t("settingsConfig.scopeNativeSelectAllDesc")} scope="UI">
                     <ToggleSwitch checked={scopeNativeSelectAll} onChange={onScopeNativeSelectAllChange} />
+                  </NativeSetting>
+                  <NativeSetting searchId="open-url-automatically" label={t("settingsConfig.openUrlAutomatically")} description={t("settingsConfig.openUrlAutomaticallyDesc")} scope="UI">
+                    <ToggleSwitch checked={openUrlAutomatically} onChange={onOpenUrlAutomaticallyChange} />
                   </NativeSetting>
                   <NativeSetting searchId="completion-sound" label={t("settingsConfig.completionSound")} description={t("settingsConfig.completionSoundDesc")} scope="UI">
                     <ToggleSwitch
@@ -835,6 +1306,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <NativeSetting searchId="provider-usage" label={t("settingsConfig.providerUsage")} description={t("settingsConfig.providerUsageDesc")} scope="UI">
                     <ToggleSwitch checked={providerUsageVisible} onChange={onProviderUsageVisibleChange} />
                   </NativeSetting>
+                  <NativeSetting searchId="skill-startup-notices" label={t("settingsConfig.skillStartupNotices")} description={t("settingsConfig.skillStartupNoticesDesc")} scope="Native OMP">
+                    <ToggleSwitch checked={nativeSettings?.skills?.showStartupDiagnostics !== false} disabled={nativeSettingsLoading} onChange={(enabled) => patchSection("skills", { showStartupDiagnostics: enabled })} />
+                  </NativeSetting>
                   <NativeSetting searchId="chat-font-size" label={t("settingsConfig.chatFontSize")} description={t("settingsConfig.chatFontSizeDesc")} scope="UI">
                     <select
                       style={nativeSelectStyle}
@@ -859,6 +1333,17 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       <option value="large" style={nativeOptionStyle}>{t("settingsConfig.uiScaleLarge")}</option>
                     </select>
                   </NativeSetting>
+                  <NativeSetting searchId="touch-targets" label={t("settingsConfig.touchTargets")} description={t("settingsConfig.touchTargetsDesc")} scope="UI">
+                    <select
+                      style={nativeSelectStyle}
+                      value={touchTargets}
+                      onChange={(event) => setTouchTargets(event.target.value as TouchTargetsPreference)}
+                    >
+                      <option value="auto" style={nativeOptionStyle}>{t("settingsConfig.touchTargetsAuto")}</option>
+                      <option value="compact" style={nativeOptionStyle}>{t("settingsConfig.touchTargetsCompact")}</option>
+                      <option value="accessible" style={nativeOptionStyle}>{t("settingsConfig.touchTargetsAccessible")}</option>
+                    </select>
+                  </NativeSetting>
                   <NativeSetting searchId="message-during-active-run" label={t("settingsConfig.messageDuringActiveRun")} description={t("settingsConfig.messageDuringActiveRunDesc")} scope="UI">
                     <select
                       style={nativeSelectStyle}
@@ -873,6 +1358,21 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       <option value="queue" style={nativeOptionStyle}>{t("settingsConfig.queueFollowUp")}</option>
                     </select>
                   </NativeSetting>
+                  <NativeSetting searchId="word-completion" label={t("settingsConfig.wordCompletion")} description={t("settingsConfig.wordCompletionDesc")} scope="UI">
+                    <select
+                      style={nativeSelectStyle}
+                      value={wordCompletion}
+                      onChange={(event) => {
+                        const next = event.target.value as WordCompletionMode;
+                        setWordCompletionMode(next);
+                        setWordCompletion(next);
+                      }}
+                    >
+                      <option value="auto" style={nativeOptionStyle}>{t("settingsConfig.wordCompletionAuto")}</option>
+                      <option value="on" style={nativeOptionStyle}>{t("settingsConfig.wordCompletionOn")}</option>
+                      <option value="off" style={nativeOptionStyle}>{t("settingsConfig.wordCompletionOff")}</option>
+                    </select>
+                  </NativeSetting>
                 </div>
               </div>
             )}
@@ -881,8 +1381,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             {currentTab === "safety" && (
               <div role="tabpanel" id="settings-panel-safety" aria-labelledby="settings-tab-safety" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
                 <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.toolSafetyApprovals")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.toolSafetyApprovalsDesc")}</p>
+                  <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.toolSafetyApprovals")}</h2>
+                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.toolSafetyApprovalsDesc")}</p>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                   <NativeSetting searchId="approval-mode" label={t("settingsConfig.approvalMode")} description={t("settingsConfig.approvalModeDesc")} scope="Native OMP">
@@ -925,8 +1425,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             {currentTab === "models" && (
               <div role="tabpanel" id="settings-panel-models" aria-labelledby="settings-tab-models" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
                 <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.modelDefaults")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.modelDefaultsDesc")}</p>
+                  <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.modelDefaults")}</h2>
+                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.modelDefaultsDesc")}</p>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                   <NativeSetting searchId="reasoning" label={t("settingsConfig.reasoning")} description={t("settingsConfig.reasoningDesc")} scope="Native OMP">
@@ -940,6 +1440,20 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       ))}
                     </select>
                   </NativeSetting>
+                  {nativeSettings?.defaultThinkingLevel === "auto" && (
+                    <NativeSetting searchId="auto-thinking-source" label={t("settingsConfig.autoThinkingSource")} description={t("settingsConfig.autoThinkingSourceDesc")} scope="Native OMP">
+                      <select
+                        style={nativeSelectStyle}
+                        value={nativeSettings.providers?.autoThinkingSource ?? "classifier"}
+                        onChange={(e) => patchSection("providers", {
+                          autoThinkingSource: e.target.value === "vendor" ? "vendor" : "classifier",
+                        })}
+                      >
+                        <option value="classifier" style={nativeOptionStyle}>{t("settingsConfig.autoThinkingClassifier")}</option>
+                        <option value="vendor" style={nativeOptionStyle}>{t("settingsConfig.autoThinkingVendor")}</option>
+                      </select>
+                    </NativeSetting>
+                  )}
                   <NativeSetting searchId="verbosity" label={t("settingsConfig.verbosity")} description={t("settingsConfig.verbosityDesc")} scope="Native OMP">
                     <select
                       style={nativeSelectStyle}
@@ -966,7 +1480,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <NativeSetting searchId="thinking-blocks" label={t("settingsConfig.thinkingBlocks")} description={t("settingsConfig.thinkingBlocksDesc")} scope="Native OMP">
                     <ToggleSwitch
                       checked={nativeSettings?.hideThinkingBlock ?? false}
-                      onChange={(checked) => patchSettings({ hideThinkingBlock: checked })}
+                      onChange={(checked) => { patchSettings({ hideThinkingBlock: checked }); onHideThinkingBlockChange?.(checked); }}
                     />
                   </NativeSetting>
                   <NativeSetting searchId="external-thinking" label={t("settingsConfig.externalThinking")} description={t("settingsConfig.externalThinkingDesc")} scope="Native OMP">
@@ -1034,18 +1548,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                         onChange={(checked) => patchSection("compaction", { autoContinue: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting searchId="maintenance-strategy" label={t("settingsConfig.maintenanceStrategy")} description={t("settingsConfig.maintenanceStrategyDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
-                        value={nativeSettings?.compaction?.strategy ?? "snapcompact"}
-                        onChange={(e) => patchSection("compaction", { strategy: e.target.value as NonNullable<NativeSettings["compaction"]>["strategy"] })}
-                      >
-                        <option value="snapcompact" style={nativeOptionStyle}>{t("settingsConfig.strategySnapcompact")}</option>
-                        <option value="handoff" style={nativeOptionStyle}>{t("settingsConfig.strategyHandoff")}</option>
-                        <option value="context-full" style={nativeOptionStyle}>{t("settingsConfig.strategyContextFull")}</option>
-                        <option value="shake" style={nativeOptionStyle}>{t("settingsConfig.strategyShake")}</option>
-                        <option value="off" style={nativeOptionStyle}>{t("settingsConfig.strategyOff")}</option>
-                      </select>
+                    <NativeSetting searchId="compaction-method-order" label={t("settingsConfig.compactionMethodOrder")} description={t("settingsConfig.compactionMethodOrderDesc")} scope="Native OMP">
+                      <CompactionMethodOrder
+                        value={nativeSettings?.compaction?.methodOrder ?? DEFAULT_COMPACTION_METHOD_ORDER}
+                        onChange={(methodOrder) => patchSection("compaction", { methodOrder })}
+                      />
                     </NativeSetting>
                     <NativeSetting searchId="compact-mid-turn" label={t("settingsConfig.compactMidTurn")} description={t("settingsConfig.compactMidTurnDesc")} scope="Native OMP">
                       <ToggleSwitch
@@ -1150,6 +1657,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <div style={{ marginBottom: 4 }}>
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.extensionsTools")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsToolsDesc")}</p>
+                  {cwd && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("skills")}>{t("skillsConfig.title")}</button>}
                 </div>
                 {cwd && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
@@ -1180,8 +1688,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
             {/* SKILLS SUB-PANEL CONTRACT MATCH */}
             {cwd && currentTab === "skills" && (
-              <div role="tabpanel" id="settings-panel-skills" aria-labelledby="settings-tab-skills" className="settings-panel-inner" style={{ display: currentTab === "skills" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <SkillsConfig embedded cwd={cwd} onClose={onClose} />
+              <div role="tabpanel" id="settings-panel-skills" aria-labelledby="settings-tab-mcp" className="settings-panel-inner" style={{ display: currentTab === "skills" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
+                <SkillsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} />
               </div>
             )}
 
@@ -1222,6 +1730,19 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
               </div>
             )}
 
+            {/* NOTIFICATIONS TAB */}
+            {currentTab === "notifications" && (
+              <div role="tabpanel" id="settings-panel-notifications" aria-labelledby="settings-tab-notifications" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
+                <div style={{ marginBottom: 4 }}>
+                  <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("notifications.title")}</h2>
+                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("notifications.subtitle")}</p>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+                  <NotificationSettingsPanel />
+                </div>
+              </div>
+            )}
+
             {/* SYSTEM & UPDATES TAB */}
             {currentTab === "system" && (
               <div role="tabpanel" id="settings-panel-system" aria-labelledby="settings-tab-system" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", display: "flex", flexDirection: "column", gap: 18 }}>
@@ -1229,6 +1750,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.systemUpdates")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.systemUpdatesDescription")}</p>
                 </div>
+
+                <AutoResumeSessionsSetting />
+
+                <AgentEnvSetting />
 
                 {/* ompweb app update card */}
                 <section style={{ padding: 14, border: appUpdateIsAvailable ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1246,10 +1771,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                         )}
                       </div>
                       <div style={{ marginTop: 4, color: appUpdateIsAvailable ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                        {checkingAppUpdate ? t("settingsConfig.checkingUpdates") : appUpdate?.updateAvailable ? t("appShell.updateVersion", { current: appUpdate.currentVersion ?? "?", available: appUpdate.availableVersion ?? "?" }) : appUpdate?.currentVersion ? t("settingsConfig.upToDate", { version: appUpdate.currentVersion }) : t("settingsConfig.versionUnavailable")}
+                        {appUpdatesDisabled ? t("settingsConfig.updatesDisabled") : checkingAppUpdate ? t("settingsConfig.checkingUpdates") : appUpdate?.updateAvailable ? t("appShell.updateVersion", { current: appUpdate.currentVersion ?? "?", available: appUpdate.availableVersion ?? "?" }) : appUpdate?.currentVersion ? t("settingsConfig.upToDate", { version: appUpdate.currentVersion }) : t("settingsConfig.versionUnavailable")}
                       </div>
                     </div>
-                    <button type="button" onClick={() => void checkForAppUpdate(true)} disabled={checkingAppUpdate} aria-label={t("settingsConfig.checkAppUpdates")} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checkingAppUpdate ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <button type="button" onClick={() => void checkForAppUpdate(true)} disabled={checkingAppUpdate || appUpdatesDisabled} aria-label={t("settingsConfig.checkAppUpdates")} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checkingAppUpdate || appUpdatesDisabled ? "not-allowed" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
                       <RefreshCw size={13} aria-hidden="true" /> {t("settingsConfig.refresh")}
                     </button>
                   </div>
@@ -1306,10 +1831,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                         )}
                       </div>
                       <div style={{ marginTop: 4, color: ompUpdateIsAvailable ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                        {checking || (!hasCheckedUpdates && !update) ? t("settingsConfig.checkingUpdates") : update?.updateAvailable ? t("appShell.updateVersion", { current: update.currentVersion ?? "?", available: update.availableVersion ?? "?" }) : update?.currentVersion ? t("settingsConfig.upToDate", { version: update.currentVersion }) : t("settingsConfig.versionUnavailable")}
+                        {ompUpdateDisabled ? t("settingsConfig.updatesDisabled") : checking || (!hasCheckedUpdates && !update) ? t("settingsConfig.checkingUpdates") : update?.updateAvailable ? t("appShell.updateVersion", { current: update.currentVersion ?? "?", available: update.availableVersion ?? "?" }) : update?.currentVersion ? t("settingsConfig.upToDate", { version: update.currentVersion }) : t("settingsConfig.versionUnavailable")}
                       </div>
                     </div>
-                    <button type="button" onClick={() => void checkForUpdate(true)} disabled={checking} aria-label={t("settingsConfig.checkOmpUpdates")} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checking ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <button type="button" onClick={() => void checkForUpdate(true)} disabled={checking || ompUpdateDisabled} aria-label={t("settingsConfig.checkOmpUpdates")} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checking || ompUpdateDisabled ? "not-allowed" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
                       <RefreshCw size={13} aria-hidden="true" /> {t("settingsConfig.refresh")}
                     </button>
                   </div>
@@ -1477,6 +2002,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   </section>
                 )}
               </div>
+            )}
+              </>
             )}
               </div>
             </SettingsHighlightContext.Provider>

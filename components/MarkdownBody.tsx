@@ -1,10 +1,12 @@
 "use client";
 
-import { Children, cloneElement, isValidElement, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { Children, cloneElement, isValidElement, useContext, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
-import { resolveLocalFileHref } from "@/lib/file-links";
+import { remarkInlineCodeFileLinks, resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
-import { normalizeDisplayMath, useMarkdownPlugins } from "../lib/markdown";
+import { AgentLinkContext, agentAwareUrlTransform, agentLinkIds, remarkAgentLinks } from "../lib/agent-links";
+import { GithubRepoContext, remarkGithubRefs } from "../lib/github-refs";
+import { normalizeDisplayMath, useMarkdownPlugins, type MarkdownPlugins } from "../lib/markdown";
 import { markdownCodeRenderer } from "./MarkdownCode";
 import { ClickableImage } from "./ImageLightbox";
 
@@ -19,7 +21,18 @@ interface MarkdownBodyProps {
 
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, suppressImages = false }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
-  const { remarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
+  const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
+  const githubRepo = useContext(GithubRepoContext);
+  // GitHub refs run first: `agent://Foo#12` must not become an issue link.
+  // Inline-code paths link only where a click can open them.
+  const remarkPlugins = useMemo<MarkdownPlugins["remarkPlugins"]>(
+    () => {
+      const plugins: MarkdownPlugins["remarkPlugins"] = [...baseRemarkPlugins, [remarkGithubRefs, { repo: githubRepo }], remarkAgentLinks];
+      return onOpenFile ? [...plugins, [remarkInlineCodeFileLinks, { cwd }]] : plugins;
+    },
+    [baseRemarkPlugins, githubRepo, onOpenFile, cwd],
+  );
+  const openAgentLink = useContext(AgentLinkContext);
 
   // Rebuilt only when its captured props change, not on every render.
   const components = useMemo<Components>(() => {
@@ -93,6 +106,19 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       if (imageParts.length > 0 && !hasMeaningfulText(textParts)) {
         return <>{children}</>;
       }
+      const agentIds = agentLinkIds(href);
+      if (agentIds.length > 0) {
+        // Outside a chat view there is nothing to open: render the handle as text.
+        if (!openAgentLink) return <>{textParts}{imageParts}</>;
+        const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+          if (event.defaultPrevented || event.button !== 0) return;
+          event.preventDefault();
+          openAgentLink(agentIds);
+        };
+        // Middle-click never fires `click`; stop it opening the unnavigable href.
+        const anchor = <a href={href} {...props} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{textParts}</a>;
+        return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
+      }
       const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
       const openFile = onOpenFile;
       if (filePath && openFile) {
@@ -124,7 +150,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       );
     },
     };
-  }, [isStreaming, cwd, onOpenFile, suppressImages]);
+  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink]);
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
@@ -132,6 +158,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={components}
+        urlTransform={agentAwareUrlTransform}
       >
         {normalizedMarkdown}
       </ReactMarkdown>

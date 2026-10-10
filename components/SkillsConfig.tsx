@@ -11,6 +11,7 @@ import {
 import { toast } from "@/components/ui/toast";
 import { Plus } from "lucide-react";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
+import { SkillDiagnosticsInspector } from "./SkillDiagnostics";
 import type {
   SkillInfo as Skill,
   SkillInstallScope,
@@ -61,10 +62,12 @@ function shortVersion(version: string | undefined, t: (key: string) => string): 
 function Toggle({
   enabled,
   loading,
+  readOnly = false,
   onToggle,
 }: {
   enabled: boolean;
   loading: boolean;
+  readOnly?: boolean;
   onToggle: () => void;
 }) {
   const { t } = useI18n();
@@ -72,12 +75,14 @@ function Toggle({
     <button
       type="button"
       onClick={onToggle}
-      disabled={loading}
+      disabled={loading || readOnly}
       aria-pressed={enabled}
       title={
-        enabled
-          ? t("skillsConfig.visibleInPrompt")
-          : t("skillsConfig.hiddenFromPrompt")
+        readOnly
+          ? t("skillsConfig.toggleReadOnly")
+          : enabled
+            ? t("skillsConfig.visibleInPrompt")
+            : t("skillsConfig.hiddenFromPrompt")
       }
       style={{
         flexShrink: 0,
@@ -86,7 +91,8 @@ function Toggle({
         borderRadius: 11,
         border: "none",
         padding: 0,
-        cursor: loading ? "wait" : "pointer",
+        cursor: readOnly ? "not-allowed" : loading ? "wait" : "pointer",
+        opacity: readOnly ? 0.5 : 1,
         background: enabled ? "var(--accent-strong)" : "var(--border)",
         position: "relative",
         transition: "background var(--dur-med) var(--ease-out-warm)",
@@ -183,6 +189,7 @@ function SkillDetail({
         <Toggle
           enabled={enabled}
           loading={toggling}
+          readOnly={skill.togglable === false}
           onToggle={() => onToggle(skill)}
         />
         {saveError && (
@@ -191,6 +198,12 @@ function SkillDetail({
           </span>
         )}
       </div>
+      {skill.togglable === false && (
+        // Visible too: a disabled button's title is unreachable by keyboard and touch.
+        <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>
+          {t("skillsConfig.toggleReadOnly")}
+        </p>
+      )}
 
       {skill.install?.skillsShUrl && (
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
@@ -716,11 +729,13 @@ export function SkillsConfig({
   onClose,
   onSelectTab,
   embedded = false,
+  sessionId,
 }: {
   cwd: string;
   onClose: () => void;
   onSelectTab?: (tab: SettingsTab) => void;
   embedded?: boolean;
+  sessionId?: string | null;
 }) {
   const isMobile = useIsMobile();
   const { t, tn } = useI18n();
@@ -861,6 +876,7 @@ export function SkillsConfig({
         body: JSON.stringify({
           filePath: skill.filePath,
           disableModelInvocation: next,
+          cwd,
         }),
       });
       const d = (await res.json()) as { success?: boolean; error?: string };
@@ -889,7 +905,7 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, [t]);
+  }, [cwd, t]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
@@ -944,6 +960,9 @@ export function SkillsConfig({
           </button>
         </div>)}
         {!embedded && onSelectTab && <SettingsTabs active="skills" onSelect={onSelectTab} />}
+        <div className="grid gap-1 border-b border-border px-3 py-2">
+          <SkillDiagnosticsInspector sessionId={sessionId} />
+        </div>
 
         {/* Body */}
         <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>

@@ -1,8 +1,9 @@
 "use client";
 
-import { memo, useState, useId, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
+import { memo, useState, useId, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps } from "react";
 import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
+import { AgentLinkContext, agentLinkIds } from "../lib/agent-links";
 import { MessageCopyActions } from "./MessageCopyActions";
 import { useSpeechContext } from "@/hooks/useSpeechSynthesis";
 import { ClickableImage } from "./ImageLightbox";
@@ -10,11 +11,13 @@ import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { isUserTurnMessage, getUserPromptText } from "@/lib/user-turn";
+import { isPassiveToolContext } from "@/lib/chat-transcript-plan";
 import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
 import { TaskResultPanel } from "./MessageView-task-panel";
 import { HubResultPanel } from "./MessageView-hub-panel";
+import { isMessageOverflowing } from "@/lib/message-overflow";
 import { getResultDiff, PairedDiffResult, PairedResult } from "./MessageView-diff-view";
 import {
   getToolPreview,
@@ -26,7 +29,6 @@ import {
   getHubJobs,
   getHubJobsHeader,
   getHubSendSummary,
-  summarizeToolCallGroup,
   getSemanticToolLabel,
   type ToolCategory,
 } from "./MessageView-tool-format";
@@ -78,42 +80,6 @@ function ToolCategoryIcon({
     default:
       return <Wrench size={size} strokeWidth={1.8} className={className} style={{ color: "var(--text-muted)", ...style }} />;
   }
-}
-
-type GroupedBlockItem =
-  | { type: "single"; item: { block: AssistantContentBlock; originalIndex: number } }
-  | { type: "toolGroup"; items: Array<{ block: ToolCallContent; originalIndex: number }> };
-
-function groupAdjacentBlocks(items: Array<{ block: AssistantContentBlock; originalIndex: number }>): GroupedBlockItem[] {
-  const result: GroupedBlockItem[] = [];
-  let currentGroup: Array<{ block: ToolCallContent; originalIndex: number }> | null = null;
-
-  for (const item of items) {
-    if (item.block.type === "toolCall") {
-      if (!currentGroup) currentGroup = [];
-      currentGroup.push({ block: item.block as ToolCallContent, originalIndex: item.originalIndex });
-    } else {
-      if (currentGroup) {
-        if (currentGroup.length === 1) {
-          result.push({ type: "single", item: currentGroup[0] });
-        } else {
-          result.push({ type: "toolGroup", items: currentGroup });
-        }
-        currentGroup = null;
-      }
-      result.push({ type: "single", item });
-    }
-  }
-
-  if (currentGroup) {
-    if (currentGroup.length === 1) {
-      result.push({ type: "single", item: currentGroup[0] });
-    } else {
-      result.push({ type: "toolGroup", items: currentGroup });
-    }
-  }
-
-  return result;
 }
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
@@ -194,10 +160,13 @@ interface Props {
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
-  /** Entry omp's `branch` command accepts for this message (a user entry, #103). */
+  /** Branch point omp's `branch` command accepts for this message (a user entry; see lib/chat-fork.ts). */
   forkEntryId?: string;
-  onFork?: (entryId: string) => void;
+  /** Forking puts the branched prompt back into the composer (edit-and-resend). */
+  forkEditsPrompt?: boolean;
+  onFork?: (entryId: string, editPrompt: boolean) => void;
   forking?: boolean;
+  forkDisabled?: boolean;
   onNavigate?: (entryId: string) => boolean | Promise<boolean>;
   prevAssistantEntryId?: string;
   onEditContent?: (content: string) => void;
@@ -205,6 +174,12 @@ interface Props {
   prevTimestamp?: number;
   sessionId?: string;
   toolCallsDefaultCollapsed?: boolean;
+  /** Open thinking blocks on mount ("Expand thinking blocks by default" in Settings). */
+  expandThinkingByDefault?: boolean;
+  /** omp `hideThinkingBlock`: omit thinking blocks. */
+  hideThinking?: boolean;
+  /** Source `content` index of each block when `message` carries a subset of an entry's blocks, so deferred thinking loads the right block. */
+  sourceBlockIndices?: number[];
   /** omp-reported output throughput (get_state.tokensPerSecond), live while streaming. */
   liveTokensPerSecond?: number | null;
 }
@@ -236,7 +211,7 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond }: Props) {
   if (message.role === "custom" && isUserTurnMessage(message)) {
     const prompt: UserMessage = { role: "user", content: message.customType === "skill-prompt" ? getUserPromptText(message) ?? "/skill" : message.content, timestamp: message.timestamp };
     return <>
@@ -245,10 +220,10 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     </>;
   }
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
+    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} onFork={onFork} forking={forking} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} liveTokensPerSecond={liveTokensPerSecond} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -256,7 +231,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   }
   if (message.role === "custom") {
     const custom = message as CustomMessage;
-    if (custom.customType === "xdev-mount-notice") {
+    if (custom.customType === "xdev-mount-notice" || isPassiveToolContext(custom)) {
       return null;
     }
     if (custom.customType === "compaction") {
@@ -280,8 +255,10 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.onOpenFile === next.onOpenFile
     && prev.entryId === next.entryId
     && prev.forkEntryId === next.forkEntryId
+    && prev.forkEditsPrompt === next.forkEditsPrompt
     && prev.onFork === next.onFork
     && prev.forking === next.forking
+    && prev.forkDisabled === next.forkDisabled
     && prev.onNavigate === next.onNavigate
     && prev.prevAssistantEntryId === next.prevAssistantEntryId
     && prev.onEditContent === next.onEditContent
@@ -289,6 +266,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
     && prev.toolCallsDefaultCollapsed === next.toolCallsDefaultCollapsed
+    && prev.expandThinkingByDefault === next.expandThinkingByDefault
+    && prev.hideThinking === next.hideThinking
+    && prev.sourceBlockIndices?.join() === next.sourceBlockIndices?.join()
     && (!prev.isStreaming || prev.liveTokensPerSecond === next.liveTokensPerSecond);
 });
 
@@ -310,20 +290,23 @@ function imageBlockSrc(img: ImageContent): string {
  *
  * omp's `branch` command accepts a user-message entry only (an assistant entry
  * answers "Invalid entry ID for branching"), so `entryId` is the branch point
- * resolved by `resolveForkEntryIds` — for an assistant reply, the user prompt
- * that started its turn (#103).
+ * resolved by `resolveForkTargets` — for an assistant reply, the next user
+ * prompt, so the reply stays in the fork's history.
  */
-function ForkSessionButton({ entryId, onFork, forking }: {
+function ForkSessionButton({ entryId, editPrompt, onFork, forking, forkDisabled }: {
   entryId: string;
-  onFork: (entryId: string) => void;
+  editPrompt: boolean;
+  onFork: (entryId: string, editPrompt: boolean) => void;
   forking?: boolean;
+  forkDisabled?: boolean;
 }) {
   const { t } = useI18n();
+  const blocked = forkDisabled || forking;
   return (
     <Tooltip content={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}>
       <button
-        onClick={() => { onFork(entryId); }}
-        disabled={forking}
+        onClick={() => { onFork(entryId, editPrompt); }}
+        disabled={blocked}
         aria-label={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}
         style={{
           display: "flex", alignItems: "center", gap: 4,
@@ -331,13 +314,13 @@ function ForkSessionButton({ entryId, onFork, forking }: {
           background: "none", border: "none",
           borderRadius: 5,
           color: forking ? "var(--accent)" : "var(--text-dim)",
-          cursor: forking ? "not-allowed" : "pointer",
+          cursor: blocked ? "not-allowed" : "pointer",
           fontSize: 11, fontWeight: 400,
           whiteSpace: "nowrap",
           transition: "color var(--dur-fast) var(--ease-out-warm)",
         }}
-        onMouseEnter={(e) => { if (!forking) e.currentTarget.style.color = "var(--accent)"; }}
-        onMouseLeave={(e) => { if (!forking) e.currentTarget.style.color = "var(--text-dim)"; }}
+        onMouseEnter={(e) => { if (!blocked) e.currentTarget.style.color = "var(--accent)"; }}
+        onMouseLeave={(e) => { if (!blocked) e.currentTarget.style.color = "var(--text-dim)"; }}
       >
         <GitFork size={11} strokeWidth={1.8} />
         {forking ? t("messageView.creating") : t("messageView.newSession")}
@@ -353,18 +336,21 @@ function SkillPromptContext({ message, cwd, onOpenFile }: { message: CustomMessa
   </details>;
 }
 
-function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
+function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, forkDisabled, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
-  onFork?: (entryId: string) => void;
+  onFork?: (entryId: string, editPrompt: boolean) => void;
   forking?: boolean;
+  forkDisabled?: boolean;
   onNavigate?: (entryId: string) => boolean | Promise<boolean>;
   prevAssistantEntryId?: string;
   onEditContent?: (content: string) => void;
 }) {
   const { t, locale } = useI18n();
   const bodyRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [hasOverflow, setHasOverflow] = useState(false);
 
   const content =
     typeof message.content === "string"
@@ -378,6 +364,20 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
     typeof message.content === "string"
       ? []
       : message.content.filter((b): b is ImageContent => b.type === "image");
+  useLayoutEffect(() => {
+    const element = bodyRef.current;
+    if (!element) return;
+    const observedElement = element;
+    const updateOverflow = () => setHasOverflow(isMessageOverflowing(observedElement));
+    updateOverflow();
+    observedElement.addEventListener("scroll", updateOverflow, { passive: true });
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateOverflow) : null;
+    observer?.observe(observedElement);
+    return () => {
+      observedElement.removeEventListener("scroll", updateOverflow);
+      observer?.disconnect();
+    };
+  }, [content, imageBlocks.length]);
 
   const time = formatTime(message.timestamp, locale);
   const canFork = !!entryId && !!onFork;
@@ -392,20 +392,22 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           className="chat-message-card"
           ref={bodyRef}
           data-selection-scope="message"
+          data-overflow={hasOverflow && !expanded ? "true" : undefined}
           tabIndex={-1}
           style={{
             maxWidth: "100%",
             minWidth: 0,
             background: "var(--user-bg)",
-            border: "1px solid color-mix(in srgb, var(--accent) 28%, transparent)",
+            border: "none",
+            borderLeft: "3px solid var(--accent)",
             borderRadius: "var(--radius-card)",
-            boxShadow: "var(--shadow-card)",
+            boxShadow: "none",
             padding: "8px 12px",
             fontSize: "var(--chat-user-font-size)",
             lineHeight: "var(--chat-line-height)",
             color: "var(--text)",
             wordBreak: "break-word",
-            maxHeight: USER_BUBBLE_MAX_HEIGHT,
+            maxHeight: expanded ? "none" : USER_BUBBLE_MAX_HEIGHT,
             overflowY: "auto",
           }}
         >
@@ -428,6 +430,23 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           )}
           {content && <div data-message-text><SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</SafeMarkdownBody></div>}
         </div>
+        {/* Expanding removes the cap, so the bubble stops overflowing; keep the toggle to collapse it again.
+            Collapsing restores the cap: assume overflow until the next measurement so the focused toggle stays mounted. */}
+        {(hasOverflow || expanded) && (
+          <button
+            type="button"
+            className="message-overflow-toggle ui-focus-ring"
+            aria-expanded={expanded}
+            aria-label={expanded ? t("messageView.collapseInput") : t("messageView.showFullInput")}
+            onClick={() => {
+              if (expanded) setHasOverflow(true);
+              setExpanded(!expanded);
+            }}
+          >
+            <span>{expanded ? t("messageView.collapseInput") : t("messageView.showFullInput")}</span>
+            <ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" style={{ transform: expanded ? "rotate(180deg)" : "none" }} />
+          </button>
+        )}
 
         {/* Bottom row: action buttons + timestamp — inside the bubble's column,
             spanning its width, so the timestamp aligns with its right edge. */}
@@ -467,7 +486,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
                 </Tooltip>
               )}
               {canFork && (
-                <ForkSessionButton entryId={entryId!} onFork={onFork!} forking={forking} />
+                <ForkSessionButton entryId={entryId!} editPrompt onFork={onFork!} forking={forking} forkDisabled={forkDisabled} />
               )}
             </div>
           )}
@@ -504,9 +523,14 @@ function AssistantMessageView({
   sessionId,
   entryId,
   forkEntryId,
+  forkEditsPrompt = false,
   onFork,
   forking,
+  forkDisabled,
   toolCallsDefaultCollapsed,
+  expandThinkingByDefault,
+  hideThinking,
+  sourceBlockIndices,
   liveTokensPerSecond,
 }: {
   message: AssistantMessage;
@@ -519,11 +543,16 @@ function AssistantMessageView({
   prevTimestamp?: number;
   sessionId?: string;
   entryId?: string;
-  /** User entry omp's `branch` command accepts for this reply (#103). */
+  /** User entry omp's `branch` command accepts for this reply (see lib/chat-fork.ts). */
   forkEntryId?: string;
-  onFork?: (entryId: string) => void;
+  forkEditsPrompt?: boolean;
+  onFork?: (entryId: string, editPrompt: boolean) => void;
   forking?: boolean;
+  forkDisabled?: boolean;
   toolCallsDefaultCollapsed: boolean;
+  expandThinkingByDefault: boolean;
+  hideThinking: boolean;
+  sourceBlockIndices?: number[];
   liveTokensPerSecond?: number | null;
 }) {
   const { t, locale } = useI18n();
@@ -541,8 +570,8 @@ function AssistantMessageView({
   const texts = (message.content ?? []).filter((block): block is TextContent => block.type === "text").map((block) => block.text);
   const canFork = !!forkEntryId && !!onFork;
   const blockItems = (message.content ?? [])
-    .map((block, originalIndex) => ({ block, originalIndex }))
-    .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
+    .map((block, index) => ({ block, originalIndex: sourceBlockIndices?.[index] ?? index }))
+    .filter(({ block }) => !(hideThinking && block.type === "thinking") && !isEmptyThinkingBlock(block, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
   const hasActivityBlocks = blocks.some((block) => block.type === "thinking" || block.type === "toolCall");
   const errorMessage = message.errorMessage?.trim() || null;
@@ -630,6 +659,7 @@ function AssistantMessageView({
   return (
     <div
       className="chat-message"
+      data-live={isStreaming ? "true" : undefined}
       style={{ marginBottom: 6 }}
     >
       {/* Model label */}
@@ -684,38 +714,23 @@ function AssistantMessageView({
       </div>
 
       <div ref={bodyRef} data-selection-scope="message" tabIndex={-1} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        {groupAdjacentBlocks(blockItems).map((group, groupIdx) => {
-          if (group.type === "single") {
-            const { block, originalIndex } = group.item;
-            return (
-              <BlockView
-                key={`${entryId ?? "stream"}-${originalIndex}`}
-                block={block}
-                toolResults={toolResults}
-                isStreaming={isStreaming}
-                streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
-                toolCallDurations={toolCallDurations}
-                cwd={cwd}
-                onOpenFile={onOpenFile}
-                sessionId={sessionId}
-                entryId={entryId}
-                blockIndex={originalIndex}
-                toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
-              />
-            );
-          }
-          return (
-            <ToolCallGroupBlock
-              key={`${entryId ?? "stream"}-group-${groupIdx}`}
-              items={group.items}
-              toolResults={toolResults}
-              isStreaming={isStreaming}
-              toolCallDurations={toolCallDurations}
-              onOpenFile={onOpenFile}
-              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
-            />
-          );
-        })}
+        {blockItems.map(({ block, originalIndex }) => (
+          <BlockView
+            key={`${entryId ?? "stream"}-${originalIndex}`}
+            block={block}
+            toolResults={toolResults}
+            isStreaming={isStreaming}
+            streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
+            toolCallDurations={toolCallDurations}
+            cwd={cwd}
+            onOpenFile={onOpenFile}
+            sessionId={sessionId}
+            entryId={entryId}
+            blockIndex={originalIndex}
+            toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+            expandThinkingByDefault={expandThinkingByDefault}
+          />
+        ))}
         {errorMessage && (
           isInterrupted ? (
             <div
@@ -775,11 +790,11 @@ function AssistantMessageView({
                   style={isThisSpeaking ? { color: "var(--accent)", background: "var(--bg-hover)" } : undefined}
                 >
                   {isThisSpeaking ? <Square size={13} aria-hidden="true" /> : <Volume2 size={13} aria-hidden="true" />}
-                  <span>{isThisSpeaking ? t("messageView.stopSpeech") : t("messageView.readAloud")}</span>
+                  <span>{isThisSpeaking ? t("messageView.stopSpeech") : t("messageView.read")}</span>
                 </button>
               </Tooltip>
             )}
-            {canFork && <ForkSessionButton entryId={forkEntryId!} onFork={onFork!} forking={forking} />}
+            {canFork && <ForkSessionButton entryId={forkEntryId!} editPrompt={forkEditsPrompt} onFork={onFork!} forking={forking} forkDisabled={forkDisabled} />}
           </div>
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>}
         </div>
@@ -788,12 +803,12 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolCallsDefaultCollapsed }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolCallsDefaultCollapsed: boolean }) {
+function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolCallsDefaultCollapsed, expandThinkingByDefault }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolCallsDefaultCollapsed: boolean; expandThinkingByDefault: boolean }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} expandByDefault={expandThinkingByDefault} />;
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
@@ -818,34 +833,57 @@ const TextBlock = memo(function TextBlock({ block, isStreaming, cwd, onOpenFile 
   && prev.onOpenFile === next.onOpenFile
 ));
 
-const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
+const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex, expandByDefault }: {
   block: ThinkingContent;
   duration?: number;
   sessionId?: string;
   entryId?: string;
   blockIndex: number;
+  expandByDefault: boolean;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
+  // The preference only seeds the state: expanding/collapsing by hand keeps
+  // working per block. It deliberately applies to a streaming block too — the
+  // reasoning the user follows closely is exactly the one being written, a
+  // "completed only" rule would have to flip the state mid-stream (fighting a
+  // manual collapse), and remounts (reload, session switch) start from the
+  // preference again either way, so streaming and completed blocks stay
+  // consistent.
+  const [expanded, setExpanded] = useState(expandByDefault);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loadingRef = useRef(false);
 
-  const handleOpenChange = (nextOpen: boolean) => {
-    setExpanded(nextOpen);
-    if (!nextOpen || !block.deferred || content !== null) return;
+  const loadDeferredContent = useCallback(() => {
+    if (!block.deferred || content !== null || loadingRef.current) return;
     if (!sessionId || !entryId) {
       setError(t("messageView.thinkingUnavailable"));
       return;
     }
 
+    loadingRef.current = true;
     setLoading(true);
     setError(null);
     void loadThinkingContent(sessionId, entryId, blockIndex)
       .then((text) => setContent(text))
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        loadingRef.current = false;
+        setLoading(false);
+      });
+  }, [block.deferred, blockIndex, content, entryId, sessionId, t]);
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    setExpanded(nextOpen);
+    if (nextOpen) loadDeferredContent();
   };
+
+  // A deferred block auto-expanded by the preference must fetch its text
+  // without a click; expanding by hand runs the same loader.
+  useEffect(() => {
+    if (expanded) loadDeferredContent();
+  }, [expanded, loadDeferredContent]);
 
   return (
     <div className="activity-row" data-activity-operation="true">
@@ -889,6 +927,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
   && prev.sessionId === next.sessionId
   && prev.entryId === next.entryId
   && prev.blockIndex === next.blockIndex
+  && prev.expandByDefault === next.expandByDefault
 ));
 
 
@@ -903,13 +942,23 @@ function inputsShallowEqual(a: unknown, b: unknown): boolean {
   return keysA.every((k) => (a as Record<string, unknown>)[k] === (b as Record<string, unknown>)[k]);
 }
 
+/** The page a `read` of an http(s) URL fetched, without read selectors such as `:raw` or `:10-20`. */
+function readTargetWebUrl(target: string): string | null {
+  try {
+    const url = new URL(target);
+    url.pathname = url.pathname.replace(/(?::(?:raw|-?\d[\d,+-]*))+$/, "");
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 const ToolCallBlock = memo(function ToolCallBlock({
   block,
   result,
   duration,
   isStreaming,
   defaultCollapsed = true,
-  inGroup = false,
   onOpenFile,
 }: {
   block: ToolCallContent;
@@ -918,10 +967,10 @@ const ToolCallBlock = memo(function ToolCallBlock({
   isStreaming?: boolean;
   defaultCollapsed?: boolean;
   cwd?: string;
-  inGroup?: boolean;
   onOpenFile?: (filePath: string) => void;
 }) {
   const { t } = useI18n();
+  const openAgentLink = useContext(AgentLinkContext);
   // `partial` results are omp's live snapshots for a tool that is still
   // executing (see lib/types.ts); the committed toolResult replaces them.
   const isRunning = result?.partial === true;
@@ -946,6 +995,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
             .map((b) => b.text)
             .join("\n"))
     : null;
+  const passiveContextText = result?.passiveContext ? contextLine(result.passiveContext, t) : null;
   const resultImages = result && Array.isArray(result.content)
     ? result.content.filter((b): b is ImageContent => b.type === "image")
     : [];
@@ -980,14 +1030,19 @@ const ToolCallBlock = memo(function ToolCallBlock({
       ? hubJobs.map((job) => job.label).join(" · ")
       : null;
 
-  const cleanFilePath = semantic.isFile && typeof block.input === "object" && block.input && "path" in block.input
-    ? String((block.input as Record<string, unknown>).path).split(":")[0]
+  const rawFilePath = semantic.isFile && typeof block.input === "object" && block.input && "path" in block.input
+    ? String((block.input as Record<string, unknown>).path).trim()
     : null;
+  const agentIds = agentLinkIds(rawFilePath ?? undefined);
+  // `history://`, `proc://`, `local://`, ... are resolved by omp, not files the viewer can open.
+  const hasUrlScheme = rawFilePath !== null && /^[a-z][a-z0-9+.-]*:\/\//i.test(rawFilePath);
+  const webUrl = hasUrlScheme && /^https?:\/\//i.test(rawFilePath) ? readTargetWebUrl(rawFilePath) : null;
+  const cleanFilePath = rawFilePath && !hasUrlScheme ? rawFilePath.split(":")[0] : null;
 
   return (
-    <div className={inGroup ? "activity-group-item" : "activity-row"} data-activity-operation="true">
+    <div className="activity-row" data-activity-operation="true">
       <Collapsible open={expanded} onOpenChange={setExpanded}>
-        <CollapsibleTrigger className={inGroup ? "activity-group-item-trigger" : "activity-row-trigger"}>
+        <CollapsibleTrigger className="activity-row-trigger">
           <span className={`activity-row-indicator${isError ? " activity-row-indicator-error" : ""}`} aria-hidden>
             {isError ? (
               <CircleAlert size={12} strokeWidth={1.8} />
@@ -1004,7 +1059,26 @@ const ToolCallBlock = memo(function ToolCallBlock({
           </span>
           <span className={`activity-row-tool${isError ? " activity-row-tool-error" : ""}`}>{hubTool ?? block.toolName}</span>
           <span className="activity-row-preview">
-            {cleanFilePath && onOpenFile ? (
+            {agentIds.length > 0 && openAgentLink ? (
+              <span
+                role="link"
+                tabIndex={0}
+                className="activity-file-link"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openAgentLink(agentIds);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.stopPropagation();
+                    openAgentLink(agentIds);
+                  }
+                }}
+                title={hubPreview ?? preview}
+              >
+                {hubPreview ?? preview}
+              </span>
+            ) : cleanFilePath && onOpenFile ? (
               <span
                 role="button"
                 tabIndex={0}
@@ -1020,6 +1094,25 @@ const ToolCallBlock = memo(function ToolCallBlock({
                   }
                 }}
                 title={hubPreview ?? preview}
+              >
+                {hubPreview ?? preview}
+              </span>
+            ) : webUrl ? (
+              <span
+                role="link"
+                tabIndex={0}
+                className="activity-file-link"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(webUrl, "_blank", "noopener,noreferrer");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.stopPropagation();
+                    window.open(webUrl, "_blank", "noopener,noreferrer");
+                  }
+                }}
+                title={webUrl}
               >
                 {hubPreview ?? preview}
               </span>
@@ -1042,6 +1135,11 @@ const ToolCallBlock = memo(function ToolCallBlock({
           />
         </CollapsibleTrigger>
         {resultMeta && <div className="activity-row-secondary">{resultMeta}</div>}
+        {passiveContextText && !expanded && (
+          <div className="activity-row-secondary" title={passiveContextText}>
+            <span aria-hidden>↳ </span>{passiveContextText}
+          </div>
+        )}
         {expanded && (
           <div className={`tool-call-details${isError ? " tool-call-details-error" : ""}`}>
             <div className="tool-call-command">
@@ -1097,7 +1195,8 @@ const ToolCallBlock = memo(function ToolCallBlock({
                       {resultImages.map((img, i) => (
                         <ClickableImage
                           key={i}
-                          src={imageBlockSrc(img)}
+                          src={img.url ? `${img.url}?thumb=1` : imageBlockSrc(img)}
+                          fullSrc={img.url}
                           alt=""
                           style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid color-mix(in srgb, var(--accent) 18%, transparent)" }}
                         />
@@ -1110,6 +1209,11 @@ const ToolCallBlock = memo(function ToolCallBlock({
                 </>
               )
             ) : null}
+            {passiveContextText && (
+              <div className="tool-call-context">
+                <span aria-hidden>↳ </span>{passiveContextText}
+              </div>
+            )}
           </div>
         )}
       </Collapsible>
@@ -1122,122 +1226,8 @@ const ToolCallBlock = memo(function ToolCallBlock({
   && prev.result === next.result
   && prev.duration === next.duration
   && prev.defaultCollapsed === next.defaultCollapsed
-  && prev.inGroup === next.inGroup
   && prev.onOpenFile === next.onOpenFile
 ));
-
-const ToolCallGroupBlock = memo(function ToolCallGroupBlock({
-  items,
-  toolResults,
-  isStreaming,
-  toolCallDurations,
-  onOpenFile,
-  toolCallsDefaultCollapsed,
-}: {
-  items: Array<{ block: ToolCallContent; originalIndex: number }>;
-  toolResults?: Map<string, ToolResultMessage>;
-  isStreaming?: boolean;
-  toolCallDurations?: Map<string, number>;
-  onOpenFile?: (filePath: string) => void;
-  toolCallsDefaultCollapsed: boolean;
-}) {
-  const { t } = useI18n();
-  const [expanded, setExpanded] = useState(!toolCallsDefaultCollapsed);
-  const blocks = items.map((i) => i.block);
-  const groupSummary = useMemo(() => summarizeToolCallGroup(blocks), [blocks]);
-
-  const hasError = blocks.some((b) => toolResults?.get(b.toolCallId)?.isError);
-  // A partial snapshot is a tool still executing, not a settled result.
-  const isPending = isStreaming && blocks.some((b) => {
-    const result = toolResults?.get(b.toolCallId);
-    return !result || result.partial === true;
-  });
-
-  const totalDuration = useMemo(() => {
-    if (!toolCallDurations) return undefined;
-    let sum = 0;
-    let counted = 0;
-    for (const b of blocks) {
-      const d = toolCallDurations.get(b.toolCallId);
-      if (d !== undefined) {
-        sum += d;
-        counted++;
-      }
-    }
-    return counted > 0 ? sum : undefined;
-  }, [blocks, toolCallDurations]);
-
-  return (
-    <div className="activity-group" data-activity-operation="true">
-      <Collapsible open={expanded} onOpenChange={setExpanded}>
-        <CollapsibleTrigger className="activity-group-header">
-          <span className="activity-group-icon-cluster" aria-hidden>
-            {groupSummary.categories.slice(0, 3).map((cat) => (
-              <ToolCategoryIcon key={cat} category={cat} size={12} />
-            ))}
-          </span>
-          <span className="activity-group-summary">
-            {groupSummary.summaryText}
-          </span>
-          {totalDuration !== undefined && (
-            <span className="activity-row-duration">
-              {t("messageView.durationSeconds", { seconds: totalDuration })}
-            </span>
-          )}
-          <span className={`activity-row-indicator${hasError ? " activity-row-indicator-error" : ""}`} aria-hidden>
-            {hasError ? (
-              <CircleAlert size={12} strokeWidth={1.8} />
-            ) : isPending ? (
-              <LoaderCircle size={12} strokeWidth={1.8} className="activity-row-spinner" />
-            ) : (
-              <Check size={12} strokeWidth={2} />
-            )}
-          </span>
-          <ChevronDown
-            size={12}
-            strokeWidth={1.8}
-            aria-hidden
-            style={{
-              flexShrink: 0,
-              transform: expanded ? "none" : "rotate(-90deg)",
-              transition: "transform var(--dur-fast) var(--ease-out-warm)",
-            }}
-          />
-        </CollapsibleTrigger>
-        {expanded && (
-          <div className="activity-group-body">
-            {items.map(({ block }) => {
-              const result = toolResults?.get(block.toolCallId);
-              const duration = toolCallDurations?.get(block.toolCallId);
-              return (
-                <ToolCallBlock
-                  key={block.toolCallId}
-                  block={block}
-                  result={result}
-                  duration={duration}
-                  isStreaming={isStreaming}
-                  defaultCollapsed={true}
-                  inGroup={true}
-                  onOpenFile={onOpenFile}
-                />
-              );
-            })}
-          </div>
-        )}
-      </Collapsible>
-    </div>
-  );
-}, (prev, next) => (
-  prev.items.length === next.items.length
-  && prev.items.every((item, i) => (
-    item.block.toolCallId === next.items[i]?.block.toolCallId
-    && item.block.toolName === next.items[i]?.block.toolName
-    && inputsShallowEqual(item.block.input, next.items[i]?.block.input)
-  ))
-  && prev.onOpenFile === next.onOpenFile
-  && (!prev.toolResults || !next.toolResults || prev.items.every((item) => prev.toolResults?.get(item.block.toolCallId) === next.toolResults?.get(item.block.toolCallId)))
-));
-
 
 function CompactionMessageView({ message }: { message: CustomMessage }) {
   const { t, locale } = useI18n();
@@ -1319,9 +1309,38 @@ function CompactionFileList({ title, files }: { title: string; files: string[] }
 function stripHiddenWrappers(text: string): string {
   let t = text.trim();
   t = t.replace(/^<!--[\s\S]*?-->\s*/, "").trim();
-  const outer = t.match(/^<([a-zA-Z0-9_-]+)(?:\s[^>]*)?>\s*([\s\S]*?)\s*<\/\1>\s*$/);
+  // No `\s*` around the lazy body: that pair backtracks super-quadratically on
+  // whitespace runs. Trim the capture instead.
+  const outer = t.match(/^<([a-zA-Z0-9_-]+)(?:\s(?:[^>"]|"[^"]*")*)?>([\s\S]*)<\/\1>$/);
   if (outer) return outer[2].trim();
   return t;
+}
+
+/**
+ * `<system-reminder reason="…" rule="…">body</system-reminder>` → tag, attributes
+ * and body. The closing tag is optional: the passive-context length cap can cut it.
+ */
+function parseLeadingWrapper(text: string): { tag: string; attrs: [string, string][]; body: string } | null {
+  const trimmed = text.trim();
+  const match = trimmed.match(/^<([\w-]+)((?:\s+[\w-]+="[^"]*")*)\s*>/);
+  if (!match) return null;
+  const closing = `</${match[1]}>`;
+  const body = trimmed.slice(match[0].length);
+  return {
+    tag: match[1],
+    attrs: [...match[2].matchAll(/([\w-]+)="([^"]*)"/g)].map((attr) => [attr[1], attr[2]]),
+    body: (body.endsWith(closing) ? body.slice(0, -closing.length) : body).trim(),
+  };
+}
+
+/** "Context (rule_violation · ts-set-map · …): body" for a wrapped passive context, plain otherwise. */
+function contextLine(text: string, t: (key: string, params?: Record<string, string>) => string): string {
+  const wrapper = parseLeadingWrapper(text);
+  const label = wrapper?.attrs.map(([, value]) => value).filter(Boolean).join(" · ");
+  const body = wrapper ? wrapper.body : text;
+  return label
+    ? t("messageView.passiveContextLabeled", { label, text: body })
+    : t("messageView.passiveContext", { text: body });
 }
 
 function friendlyHiddenLabel(customType: string, t: (key: string) => string): string {
@@ -1537,7 +1556,11 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
 
 function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
   const { t, locale } = useI18n();
-  const [contentExpanded, setContentExpanded] = useState(true);
+  // Reminders and job notices are activity, as in the TUI: start collapsed to
+  // their first line; the header toggles them like a tool call.
+  const isDeveloper = message.customType === "developer";
+  const isNotice = isDeveloper || message.customType === "async-result" || message.customType === "lsp-late-diagnostic";
+  const [contentExpanded, setContentExpanded] = useState(!isNotice);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const { copied, copy: copyContent } = useCopyFeedback();
   const text = getMessageText(message.content);
@@ -1546,8 +1569,19 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   const detailsText = hasDetails ? safeJson(message.details) : "";
   const isIrc = IRC_CUSTOM_TYPES.has(message.customType);
   const ircEnvelope = isIrc ? parseIrcEnvelope(text) : null;
-  const displayText = ircEnvelope ? ircEnvelope.body : text;
-  const title = isIrc
+  // Async results (raw job output) and late LSP diagnostics are plain text wrapped
+  // in <system-notice>. As markdown the wrapper turns the body into one raw HTML
+  // block (newlines collapse) and `---` becomes a heading, so strip it and show
+  // them verbatim.
+  const isPlainText = message.customType === "async-result" || message.customType === "lsp-late-diagnostic";
+  const displayText = ircEnvelope ? ircEnvelope.body : isPlainText || isDeveloper ? stripHiddenWrappers(text) : text;
+  // `<system-reminder reason="…" rule="…">` → "system-reminder · reason=… · rule=…".
+  const wrapper = isDeveloper ? parseLeadingWrapper(text) : null;
+  const firstLine = displayText.split("\n").find((line) => line.trim())?.trim() ?? "";
+  const collapsedPreview = firstLine && firstLine !== displayText.trim() ? `${firstLine} …` : firstLine;
+  const title = wrapper
+    ? [wrapper.tag, ...wrapper.attrs.map(([key, value]) => `${key}=${value}`)].join(" · ")
+    : isIrc
     ? (ircEnvelope?.sender ?? formatCustomType(message.customType))
     : message.customType === "advisor"
       ? t("messageView.advisorLabel")
@@ -1568,6 +1602,11 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
         }}
       >
         <div
+          role={isNotice ? "button" : undefined}
+          tabIndex={isNotice ? 0 : undefined}
+          aria-expanded={isNotice ? contentExpanded : undefined}
+          onClick={isNotice ? () => setContentExpanded((v) => !v) : undefined}
+          onKeyDown={isNotice ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setContentExpanded((v) => !v); } } : undefined}
           style={{
             userSelect: "none",
             display: "flex",
@@ -1578,12 +1617,28 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
             background: "var(--bg-panel)",
             color: "var(--text-muted)",
             fontSize: 12,
+            cursor: isNotice ? "pointer" : undefined,
           }}
         >
-          <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
+          {isNotice && (
+            <ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, transform: contentExpanded ? "none" : "rotate(-90deg)" }} />
+          )}
+          <span
+            style={{
+              color: "var(--text-muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              fontWeight: 650,
+              minWidth: 0,
+              // Collapsed notices keep the header to one line, like a tool call's arguments.
+              ...(isNotice && !contentExpanded
+                ? { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+                : { overflowWrap: "anywhere" }),
+            }}
+          >
             {isIrc && message.customType === "irc:incoming" ? `← ${title}` : title}
           </span>
-          {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
+          {time && <span style={{ marginLeft: "auto", flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
         </div>
 
         {contentExpanded ? (
@@ -1604,7 +1659,15 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
                 })}
               </div>
             )}
-            {displayText ? <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{displayText}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noMessage")}</span>}
+            {!displayText ? (
+              <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noMessage")}</span>
+            ) : isPlainText ? (
+              <pre style={{ margin: 0, maxHeight: 420, overflow: "auto", whiteSpace: "pre", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5, color: "var(--text-muted)" }}>
+                {displayText}
+              </pre>
+            ) : (
+              <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{displayText}</MarkdownBody>
+            )}
           </div>
         ) : (
           <button
@@ -1619,9 +1682,10 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
               cursor: "pointer",
               fontSize: 12,
               textAlign: "left",
+              ...(isNotice ? { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } : {}),
             }}
           >
-            {displayText ? previewText(displayText) : t("messageView.showExtensionMessage")}
+            {isNotice && collapsedPreview ? collapsedPreview : displayText ? previewText(displayText) : t("messageView.showExtensionMessage")}
           </button>
         )}
 

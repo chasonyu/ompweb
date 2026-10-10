@@ -1,17 +1,20 @@
 "use client";
 
-import { memo, type RefObject } from "react";
+import { memo, useEffect, useState, type Ref, type RefObject } from "react";
 import {
   AtSign,
+  CheckCheck,
   ChevronsDownUp,
   Copy,
   Download,
+  FileX,
   Files,
   Folder,
   GitBranch,
   LocateFixed,
   RefreshCw,
   Search,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -19,10 +22,14 @@ import { TabBar, type Tab } from "./TabBar";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { GitChangesPanel } from "./GitChangesPanel";
 import { FileViewer } from "./FileViewer";
+import { NotificationList } from "./NotificationList";
+import { toastHistory, useUnreadToastCount } from "./ui/toast";
+import { WorktreesPanel } from "./WorktreesPanel";
+import type { WorktreeContext } from "./SessionSidebar-helpers";
 import { useI18n } from "@/lib/i18n";
 import { getFileName } from "@/lib/file-paths";
 
-export type RightPanelView = "explorer" | "git" | "file";
+export type RightPanelView = "explorer" | "git" | "notifications" | "worktrees" | "file";
 
 interface Props {
   fileTabs: Tab[];
@@ -30,14 +37,16 @@ interface Props {
   rightView: RightPanelView;
   onSelectView: (view: RightPanelView) => void;
   rightPanelOpen: boolean;
+  onClose: () => void;
   rightPanelWidth: number | null;
   rightPanelResizing: boolean;
-  rightPanelRef: RefObject<HTMLDivElement | null>;
+  rightPanelRef: Ref<HTMLDivElement>;
   fileExplorerRef: RefObject<FileExplorerHandle | null>;
   revealPath: string | null;
   onRevealDone: () => void;
   explorerCwd: string | null;
-  activeCwd: string | null;
+  /** Active Git workspace's worktrees (null when it is not a Git top-level repo). */
+  worktrees: WorktreeContext | null;
   explorerRefreshKey: number;
   fileSearchOpen: boolean;
   onToggleFileSearch: () => void;
@@ -48,6 +57,7 @@ interface Props {
   explorerIsRepo: boolean;
   explorerRefreshing: boolean;
   isMobile: boolean;
+  isCompactOverlay: boolean;
   onOpenFile: (filePath: string, fileName: string, sourceSessionId?: string | null) => void;
   onSelectFileTab: (id: string) => void;
   onCloseFileTab: (id: string) => void;
@@ -79,6 +89,7 @@ export const RightPanel = memo(function RightPanel({
   rightView,
   onSelectView,
   rightPanelOpen,
+  onClose,
   rightPanelWidth,
   rightPanelResizing,
   rightPanelRef,
@@ -86,7 +97,7 @@ export const RightPanel = memo(function RightPanel({
   revealPath,
   onRevealDone,
   explorerCwd,
-  activeCwd,
+  worktrees,
   explorerRefreshKey,
   fileSearchOpen,
   onToggleFileSearch,
@@ -97,6 +108,7 @@ export const RightPanel = memo(function RightPanel({
   explorerIsRepo,
   explorerRefreshing,
   isMobile,
+  isCompactOverlay,
   onOpenFile,
   onSelectFileTab,
   onCloseFileTab,
@@ -119,12 +131,23 @@ export const RightPanel = memo(function RightPanel({
   const { t } = useI18n();
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const gitBadge = explorerIsRepo ? explorerGitCount : 0;
+  const unreadNotifications = useUnreadToastCount();
+  const [visitedViews, setVisitedViews] = useState<Set<RightPanelView>>(() => new Set(["explorer"]));
+  useEffect(() => {
+    setVisitedViews((previous) => {
+      if (previous.has(rightView)) return previous;
+      const next = new Set(previous);
+      next.add(rightView);
+      return next;
+    });
+  }, [rightView]);
 
   return (
     <>
       {/* Resize handle — desktop only, hidden while the panel is closed */}
       {!isMobile && rightPanelOpen && (
         <div
+          className="right-panel-resize-handle"
           role="separator"
           aria-orientation="vertical"
           aria-label={t("appShell.resizeFilePanel")}
@@ -150,19 +173,27 @@ export const RightPanel = memo(function RightPanel({
         />
       )}
       {/* Right panel: file viewer — always mounted, width animated via CSS */}
-      <div
+      <aside
+        id="workspace-file-panel"
         ref={rightPanelRef}
         className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizing ? " right-panel-resizing" : ""}`}
+        role={isCompactOverlay ? "dialog" : undefined}
+        aria-modal={isCompactOverlay ? true : undefined}
+        aria-label={t("appShell.filePanel")}
+        aria-hidden={!rightPanelOpen}
+        tabIndex={isCompactOverlay ? -1 : undefined}
+        inert={!rightPanelOpen ? true : undefined}
         style={{
           display: "flex",
           flexDirection: "column",
           borderLeft: "1px solid var(--border)",
           background: "var(--bg)",
+          zIndex: isCompactOverlay ? 210 : undefined,
           ...(!isMobile && rightPanelWidth !== null ? { "--right-panel-width": `${rightPanelWidth}px` } : {}),
         }}
       >
         {/* Right panel toolbar: tabs + editor integrations (chat, path, explorer) */}
-        <div className="right-panel-toolbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", minHeight: isMobile ? 44 : 36, paddingRight: isMobile ? 44 : 36, flexWrap: "wrap" }}>
+        <div className="right-panel-toolbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", minHeight: "var(--shell-topbar-height)", flexWrap: "wrap" }}>
           <div style={{ flex: isMobile ? "1 0 100%" : "1 1 160px", overflow: "hidden", minWidth: 0 }}>
             <TabBar
               tabs={fileTabs}
@@ -175,6 +206,11 @@ export const RightPanel = memo(function RightPanel({
               gitSelected={rightView === "git"}
               onSelectGit={() => onSelectView("git")}
               gitBadge={gitBadge}
+              notificationsSelected={rightView === "notifications"}
+              onSelectNotifications={() => onSelectView("notifications")}
+              notificationsBadge={unreadNotifications}
+              worktreesSelected={rightView === "worktrees"}
+              onSelectWorktrees={() => onSelectView("worktrees")}
             />
           </div>
           {rightView === "explorer" ? (
@@ -240,7 +276,34 @@ export const RightPanel = memo(function RightPanel({
               </button>
             </div>
             )
-          ) : activeFileTab && (
+          ) : rightView === "notifications" ? (
+            <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={t("appShell.notifications")}>
+              {/* aria-disabled (not disabled) keeps the button focusable after use. */}
+              <button
+                onClick={toastHistory.markAllRead}
+                aria-disabled={unreadNotifications === 0}
+                title={t("appShell.notificationsMarkRead")}
+                aria-label={t("appShell.notificationsMarkRead")}
+                className="ui-focus-ring"
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)", cursor: unreadNotifications === 0 ? "default" : "pointer", opacity: unreadNotifications === 0 ? 0.5 : 1 }}
+                onMouseEnter={(e) => { if (unreadNotifications === 0) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+              >
+                <CheckCheck size={13} strokeWidth={2} aria-hidden="true" />
+              </button>
+              <button
+                onClick={toastHistory.clear}
+                title={t("appShell.notificationsClear")}
+                aria-label={t("appShell.notificationsClear")}
+                className="ui-focus-ring"
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)", cursor: "pointer" }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+              >
+                <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
+              </button>
+            </div>
+          ) : rightView === "file" && activeFileTab && (
             <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={activeFileTab.filePath}>
               <button
                 onClick={onMentionActiveFile}
@@ -302,15 +365,24 @@ export const RightPanel = memo(function RightPanel({
                 onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
               >
-                <X size={13} strokeWidth={2} aria-hidden="true" />
+                <FileX size={13} strokeWidth={2} aria-hidden="true" />
               </button>
             </div>
           )}
+          <button
+            type="button"
+            onClick={onClose}
+            title={t("appShell.hideFilePanel")}
+            aria-label={t("appShell.hideFilePanel")}
+            className="shell-toolbar-btn right-panel-close-button ui-focus-ring"
+          >
+            <X size={16} strokeWidth={1.8} aria-hidden="true" />
+          </button>
         </div>
 
         {/* Explorer tab view — kept mounted so expansion survives tab switches. */}
-        <div style={{ display: rightView === "explorer" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
-          {explorerCwd ? (
+        <div id="workspace-file-panel-explorer" role="tabpanel" aria-label={t("sessionSidebar.explorer")} style={{ display: rightView === "explorer" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {visitedViews.has("explorer") && (explorerCwd ? (
             <>
               <div
                 title={explorerCwd}
@@ -375,11 +447,11 @@ export const RightPanel = memo(function RightPanel({
               <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 600 }}>{t("sessionSidebar.explorer")}</div>
               <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t("sessionSidebar.selectProjectFirst")}</div>
             </div>
-          )}
+          ))}
         </div>
         {/* Git changes tab view — kept mounted so selection survives tab switches. */}
-        <div style={{ display: rightView === "git" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
-          {explorerCwd ? (
+        <div id="workspace-file-panel-git" role="tabpanel" aria-label={t("tabBar.git")} style={{ display: rightView === "git" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {visitedViews.has("git") && (explorerCwd ? (
             <GitChangesPanel
               cwd={explorerCwd}
               refreshKey={explorerRefreshKey}
@@ -393,17 +465,25 @@ export const RightPanel = memo(function RightPanel({
               <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 600 }}>{t("tabBar.git")}</div>
               <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t("sessionSidebar.selectProjectFirst")}</div>
             </div>
-          )}
+          ))}
+        </div>
+        <div id="workspace-file-panel-notifications" role="tabpanel" tabIndex={-1} aria-label={t("appShell.notifications")} style={{ display: rightView === "notifications" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden", outline: "none" }}>
+          {visitedViews.has("notifications") && <NotificationList />}
+        </div>
+        <div id="workspace-file-panel-worktrees" role="tabpanel" aria-label={t("tabBar.worktrees")} style={{ display: rightView === "worktrees" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {/* Keyed by repository so a draft branch or pending confirmation never carries over to another repo. */}
+          {visitedViews.has("worktrees") && <WorktreesPanel key={worktrees?.projectRoot ?? ""} ctx={worktrees} />}
         </div>
         {/* Keep open viewers mounted so switching tabs preserves scroll and preview state. */}
-        <div style={{ display: rightView === "file" ? "block" : "none", flex: 1, minHeight: 0, overflow: "hidden" }}>
+        <div id="workspace-file-panel-file" role="tabpanel" aria-label={activeFileTab?.filePath ?? t("appShell.filePanel")} style={{ display: rightView === "file" ? "block" : "none", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {fileTabs.length > 0 ? fileTabs.map((tab) => (
             <div key={tab.id} style={{ display: tab.id === activeFileTabId ? "block" : "none", height: "100%" }}>
               <FileViewer
                 filePath={tab.filePath}
-                cwd={activeCwd ?? undefined}
+                cwd={explorerCwd ?? undefined}
                 sourceSessionId={tab.sourceSessionId}
                 gitRefreshKey={explorerRefreshKey}
+                active={tab.id === activeFileTabId && rightPanelOpen && rightView === "file"}
                 onMentionLines={tab.id === activeFileTabId && rightPanelOpen && rightView === "file" ? onMentionLines : undefined}
                 onOpenFile={(filePath) => onOpenFile(
                   filePath,
@@ -420,7 +500,7 @@ export const RightPanel = memo(function RightPanel({
             </div>
           )}
         </div>
-      </div>
+      </aside>
     </>
   );
 });

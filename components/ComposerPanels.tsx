@@ -14,6 +14,7 @@ import { formatCompactNumber, formatPercent, getCacheHitRate } from "@/lib/forma
 import { copyText } from "@/lib/clipboard";
 import { TodoList } from "./TodoList";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
+import { BtwPanel, type BtwPanelProps } from "./BtwPanel";
 
 // Panels unmount when their inputs are empty and remount when they fill
 const TODO_COLLAPSED_STORAGE_KEY = "omp-web:composer-todo-collapsed";
@@ -154,8 +155,70 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(() => loadCollapsed(SUBAGENTS_COLLAPSED_STORAGE_KEY, defaultExpanded));
-  const runningCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
+  // Not persisted: finished runs pile up, so the group re-collapses on remount.
+  const [completedExpanded, setCompletedExpanded] = useState(defaultExpanded);
+  const running: SubagentInfo[] = [];
+  const completed: SubagentInfo[] = [];
+  for (const subagent of subagents) {
+    (subagent.source !== "history" && subagent.status === "started" ? running : completed).push(subagent);
+  }
+  const runningCount = running.length;
 
+  function renderChip(subagent: SubagentInfo) {
+    const stateLabel = t(SUBAGENT_STATE_KEYS[subagent.status]);
+    const label = `${subagent.agent} · ${stateLabel} · ${subagent.task ?? subagent.description ?? ""}`.replace(/\s+$/, "");
+    const live = subagent.source !== "history";
+    return (
+      <button
+        key={subagent.id}
+        type="button"
+        className="ui-focus-ring"
+        onClick={() => onSelectSubagent(subagent)}
+        aria-label={label}
+        title={`${label}${subagent.detached ? " (async)" : ""}`}
+        style={{
+          display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
+          maxWidth: "min(320px, 100%)", padding: "5px 9px",
+          border: "1px solid color-mix(in srgb, var(--border) 86%, transparent)",
+          borderRadius: "var(--radius-control)",
+          background: "var(--bg)",
+          fontSize: 11.5,
+          fontFamily: "inherit",
+          cursor: "pointer",
+          color: live && subagent.status === "started" ? "var(--text)" : "var(--text-dim)",
+          opacity: live && subagent.status === "started" ? 1 : 0.72,
+          transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 40%, var(--border))";
+          e.currentTarget.style.background = "var(--bg-hover)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.borderColor = "color-mix(in srgb, var(--border) 86%, transparent)";
+          e.currentTarget.style.background = "var(--bg)";
+        }}
+      >
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, maxWidth: "100%" }}>
+          <SubagentStatusBadge subagent={subagent} />
+          <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", flexShrink: 0 }}>
+            {subagent.agent}
+          </span>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>
+            {subagent.task ?? subagent.description ?? stateLabel}
+          </span>
+          {subagent.detached && (
+            <span
+              aria-hidden
+              style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0, fontFamily: "var(--font-mono)" }}
+            >
+              ⤴
+            </span>
+          )}
+        </span>
+        <SubagentActivityLine subagent={subagent} />
+      </button>
+    );
+  }
   if (subagents.length === 0) return null;
 
   return (
@@ -193,85 +256,62 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
       </button>
       {!collapsed && (
         <div
-          className="flex flex-wrap gap-1.5 px-3 py-2.5 animate-slide-down"
+          className="grid grid-cols-1 gap-2 px-3 py-2.5 animate-slide-down"
           style={{ maxHeight: "min(30vh, 240px)", overflowY: "auto" }}
         >
-          {subagents.map((subagent) => {
-            const stateLabel = t(SUBAGENT_STATE_KEYS[subagent.status]);
-            const label = `${subagent.agent} · ${stateLabel} · ${subagent.task ?? subagent.description ?? ""}`.replace(/\s+$/, "");
-            const live = subagent.source !== "history";
-            return (
+          {running.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">{running.map(renderChip)}</div>
+          )}
+          {completed.length > 0 && (
+            <div className="grid grid-cols-1 gap-1.5">
               <button
-                key={subagent.id}
                 type="button"
-                className="ui-focus-ring"
-                onClick={() => onSelectSubagent(subagent)}
-                aria-label={label}
-                title={`${label}${subagent.detached ? " (async)" : ""}`}
-                style={{
-                  display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
-                  maxWidth: 320, padding: "5px 9px",
-                  border: "1px solid color-mix(in srgb, var(--border) 86%, transparent)",
-                  borderRadius: "var(--radius-control)",
-                  background: "var(--bg)",
-                  fontSize: 11.5,
-                  fontFamily: "inherit",
-                  cursor: "pointer",
-                  color: live && subagent.status === "started" ? "var(--text)" : "var(--text-dim)",
-                  opacity: live && subagent.status === "started" ? 1 : 0.72,
-                  transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 40%, var(--border))";
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = "color-mix(in srgb, var(--border) 86%, transparent)";
-                  e.currentTarget.style.background = "var(--bg)";
-                }}
+                onClick={() => setCompletedExpanded((value) => !value)}
+                aria-expanded={completedExpanded}
+                className="ui-focus-ring flex cursor-pointer items-center gap-1.5 justify-self-start text-left text-xs text-text-muted"
+                style={{ background: "none", border: "none", padding: "2px 4px", margin: "0 -4px", fontFamily: "inherit" }}
               >
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, maxWidth: "100%" }}>
-                  <SubagentStatusBadge subagent={subagent} />
-                  <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", flexShrink: 0 }}>
-                    {subagent.agent}
-                  </span>
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>
-                    {subagent.task ?? subagent.description ?? stateLabel}
-                  </span>
-                  {subagent.detached && (
-                    <span
-                      aria-hidden
-                      style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0, fontFamily: "var(--font-mono)" }}
-                    >
-                      ⤴
-                    </span>
-                  )}
-                </span>
-                <SubagentActivityLine subagent={subagent} />
+                <ChevronDown
+                  size={12}
+                  strokeWidth={1.8}
+                  aria-hidden
+                  style={{
+                    color: "var(--text-dim)",
+                    transform: completedExpanded ? "rotate(0deg)" : "rotate(-90deg)",
+                    transition: "transform var(--dur-med) var(--ease-out-warm)",
+                  }}
+                />
+                {t("chatWindow.completedSubagents", { count: completed.length })}
               </button>
-            );
-          })}
+              {completedExpanded && (
+                <div className="flex flex-wrap gap-1.5">{completed.map(renderChip)}</div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </section>
   );
 }
 
-/** Session panels attached to the composer: live todo plan + running
- * subagent roster. Each is independently collapsible via its header row
- * (`chevron`) and starts collapsed; the headers always show live progress /
- * running-summary. Rendered pinned above the chat input. */
-export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaultExpanded = false }: {
+/** Session panels attached to the composer: the active side question (`/btw`),
+ * live todo plan + running subagent roster. Each is independently collapsible
+ * via its header row (`chevron`); todo/subagents start collapsed (headers
+ * always show live progress / running-summary), a new side question starts
+ * expanded. Rendered pinned above the chat input. */
+export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, btw = null, defaultExpanded = false }: {
   todoPhases: TodoPhase[];
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;
+  btw?: BtwPanelProps | null;
   /** Initial expansion of both panels (default: collapsed). */
   defaultExpanded?: boolean;
 }) {
   const [todoCollapsed, setTodoCollapsed] = useState(() => loadCollapsed(TODO_COLLAPSED_STORAGE_KEY, defaultExpanded));
-  if (todoPhases.length === 0 && subagents.length === 0) return null;
+  if (todoPhases.length === 0 && subagents.length === 0 && !btw) return null;
   return (
     <div style={{ display: "grid", gap: 6, marginBottom: 8 }}>
+      {btw && <BtwPanel key={btw.record.id} {...btw} />}
       <TodoList
         phases={todoPhases}
         collapsible

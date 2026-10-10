@@ -38,16 +38,3 @@ export function getEntryUserPromptText(entry: unknown): string | undefined {
   if (entry.type === "custom_message") return getUserPromptText({ ...entry, role: "custom" });
   return undefined;
 }
-
-/** Older OMP builds retain skill name/args but not the original separator whitespace. */
-export function matchesQueuedUserPrompt(queued: string, delivered: unknown): boolean {
-  const text = getUserPromptText(delivered);
-  if (!text) return false;
-  if (queued === text) return true;
-  if (!isUserTurnMessage(delivered) || delivered.role !== "custom" || delivered.customType !== "skill-prompt") return false;
-  const normalize = (value: string) => {
-    const match = value.trim().match(/^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/);
-    return match ? `/skill:${match[1]}${match[2]?.trim() ? ` ${match[2].trim()}` : ""}` : value;
-  };
-  return normalize(queued) === normalize(text);
-}

@@ -12,6 +12,8 @@ const jiti = createJiti(import.meta.url, {
 });
 const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await jiti.import("./MessageView.tsx");
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
+const { buildSessionContext } = await jiti.import("../lib/session-reader.ts");
+const { collectToolResults, planTranscriptRows } = await jiti.import("../lib/chat-transcript-plan.ts");
 afterEach(cleanup);
 
 test("user skill renders the original command as a user bubble with optional expanded context", () => {
@@ -93,7 +95,46 @@ test("plain Copy keeps full oversized message source instead of the reveal contr
   }
 });
 
-test("expanded grouped tool inputs follow streaming arguments without toggling output", () => {
+test("expanded oversized user message can be collapsed again", (t) => {
+  // Layout stub: capped bubbles overflow; an uncapped bubble fits its content.
+  const observers = [];
+  const originalResizeObserver = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; observers.push(this); }
+    observe() {}
+    disconnect() {}
+  };
+  const proto = window.HTMLElement.prototype;
+  const scrollHeight = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+  const clientHeight = Object.getOwnPropertyDescriptor(proto, "clientHeight");
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get() { return 1000; } });
+  Object.defineProperty(proto, "clientHeight", {
+    configurable: true,
+    get() { return this.style.maxHeight === "none" ? 1000 : 300; },
+  });
+  t.after(() => {
+    globalThis.ResizeObserver = originalResizeObserver;
+    for (const [name, descriptor] of [["scrollHeight", scrollHeight], ["clientHeight", clientHeight]]) {
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else delete proto[name];
+    }
+  });
+
+  const view = render(React.createElement(MessageView, { message: { role: "user", content: "long\n\n".repeat(200) } }));
+  const resize = () => act(() => { for (const observer of observers) observer.callback([]); });
+  fireEvent.click(view.getByRole("button", { name: "Show full input" }));
+  resize();
+  const toggle = view.getByRole("button", { name: "Collapse input" });
+  toggle.focus();
+  fireEvent.click(toggle);
+  // Before re-measuring, the same toggle must stay mounted and focused.
+  assert.equal(document.activeElement, toggle);
+  resize();
+  assert.equal(view.getByRole("button", { name: "Show full input" }), toggle);
+  assert.equal(document.activeElement, toggle);
+});
+
+test("expanded tool inputs follow streaming arguments without toggling output", () => {
   const code = "print('first')\nprint('complete')";
   const editInput = { path: "/tmp/example.ts", patch: "-old\n+new", options: { dryRun: false } };
   const toolResults = new Map([["edit-call", {
@@ -112,11 +153,9 @@ test("expanded grouped tool inputs follow streaming arguments without toggling o
     },
   });
   const { container, rerender } = render(React.createElement(MessageView, props("print('first')")));
-  // Open both tool rows through their disclosure triggers. The collapsible
-  // group header is not a row, so only the group-item triggers are clicked.
-  const rowTriggers = () => [...container.querySelectorAll("button.activity-group-item-trigger")];
+  // With collapse off, each tool call is its own already-open row.
+  const rowTriggers = () => [...container.querySelectorAll("button.activity-row-trigger")];
   assert.equal(rowTriggers().length, 2);
-  for (const trigger of rowTriggers()) fireEvent.click(trigger);
   const toggles = (label) => [...container.querySelectorAll("button.tool-call-input-toggle")]
     .filter((button) => (button.textContent ?? "").includes(label));
   const inputPanels = () => [...container.querySelectorAll("div.tool-call-input")];
@@ -195,6 +234,55 @@ test("expanded tool calls show the compact command header", () => {
   assert.match(html, /aria-expanded="true"/);
   assert.match(html, /tool-call-details/);
   assert.match(html, /\$<\/span><code>read foo\.ts<\/code>/);
+});
+
+test("read paths with an internal URL scheme are not file links", () => {
+  const render = (path) => renderToStaticMarkup(React.createElement(MessageView, {
+    onOpenFile() {},
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path } }],
+    },
+  }));
+
+  for (const path of ["history://ScoutAgent", "proc://Job1", " local://notes.md", "ftp://example.com/a.ts", "javascript://x%0Aalert(1)", "file:///etc/passwd"]) {
+    assert.doesNotMatch(render(path), /activity-file-link|role="link"/, path);
+  }
+  assert.match(render("src/foo.ts:10"), /activity-file-link/);
+});
+
+test("read paths with a web URL open the fetched page in a new tab without toggling the row", () => {
+  const opened = [];
+  const originalOpen = window.open;
+  window.open = (...args) => { opened.push(args.join(" ")); return null; };
+  const openedFiles = [];
+  try {
+    const cases = [
+      [" https://example.com/docs", "https://example.com/docs _blank noopener,noreferrer"],
+      ["HTTPS://Example.com/a:raw", "https://example.com/a _blank noopener,noreferrer"],
+      ["https://example.com:8080/a.md:10-20", "https://example.com:8080/a.md _blank noopener,noreferrer"],
+    ];
+    for (const [path, expected] of cases) {
+      opened.length = 0;
+      const { container, getByRole } = render(React.createElement(MessageView, {
+        onOpenFile(file) { openedFiles.push(file); },
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path } }],
+        },
+      }));
+      const trigger = container.querySelector("[aria-expanded]");
+      const expanded = trigger.getAttribute("aria-expanded");
+      fireEvent.click(getByRole("link"));
+      fireEvent.keyDown(getByRole("link"), { key: "Enter" });
+      assert.deepEqual(opened, [expected, expected], path);
+      assert.equal(trigger.getAttribute("aria-expanded"), expanded, path);
+      cleanup();
+    }
+  } finally {
+    window.open = originalOpen;
+  }
+  assert.deepEqual(openedFiles, []);
 });
 
 test("ask tool previews question prompts instead of object coercion", () => {
@@ -397,6 +485,203 @@ test("advisor custom messages use the localized advisor label", () => {
   assert.doesNotMatch(html, /customType/);
 });
 
+test("async-result notices start collapsed to their first line and expand to the exact line layout", () => {
+  const view = render(React.createElement(MessageView, {
+    message: {
+      role: "custom",
+      customType: "async-result",
+      content: "<system-notice>\nBackground job bg_1 has completed. Resume your work using the result below.\n/root/repo\n---\nWall time: 0.16 seconds\n</system-notice>",
+      display: true,
+    },
+  }));
+  assert.equal(view.container.querySelector("pre"), null);
+  assert.match(view.container.textContent, /Background job bg_1 has completed\. Resume your work using the result below\. …/);
+  assert.doesNotMatch(view.container.textContent, /Wall time/);
+
+  fireEvent.click(view.getByRole("button", { expanded: false }));
+  const pre = view.container.querySelector("pre");
+  assert.equal(pre.textContent, "Background job bg_1 has completed. Resume your work using the result below.\n/root/repo\n---\nWall time: 0.16 seconds");
+  assert.match(pre.getAttribute("style"), /white-space: pre;/);
+  assert.doesNotMatch(view.container.innerHTML, /system-notice|<h2/);
+});
+
+test("late LSP diagnostic notices expand to their exact line layout", () => {
+  const view = render(React.createElement(MessageView, {
+    message: {
+      role: "custom",
+      customType: "lsp-late-diagnostic",
+      content: "<system-notice>\nLate LSP diagnostics arrived after the edit returned:\n/repo/a.py — 0 error(s), 1 warning(s)\n/repo/a.py:8:1 [warning] [Ruff] Import block is un-sorted or un-formatted\n\nhelp: Organize imports (I001)\n</system-notice>",
+      display: true,
+    },
+  }));
+  fireEvent.click(view.getByRole("button", { expanded: false }));
+  assert.equal(
+    view.container.querySelector("pre").textContent,
+    "Late LSP diagnostics arrived after the edit returned:\n/repo/a.py — 0 error(s), 1 warning(s)\n/repo/a.py:8:1 [warning] [Ruff] Import block is un-sorted or un-formatted\n\nhelp: Organize imports (I001)",
+  );
+  assert.doesNotMatch(view.container.innerHTML, /system-notice/);
+});
+
+test("developer reminders show their wrapper attributes, start collapsed, and toggle from the header", () => {
+  const view = render(React.createElement(MessageView, {
+    message: {
+      role: "custom",
+      customType: "developer",
+      content: [{ type: "text", text: '<system-reminder reason="rule_violation" rule="ts-no-tiny-functions" path="builtin-defaults:ts-no-tiny-functions.md" note="a>b">\nUser-defined rule matched tool-call arguments.\n\n## Why\n\n- One-line wrappers: no real behavior.\n</system-reminder>' }],
+      display: true,
+    },
+  }));
+  const header = view.getByRole("button", { expanded: false });
+  assert.match(header.textContent, /^system-reminder · reason=rule_violation · rule=ts-no-tiny-functions · path=builtin-defaults:ts-no-tiny-functions\.md · note=a>b/);
+  // A `>` inside an attribute value must not leak wrapper syntax into the body.
+  assert.match(view.container.textContent, /User-defined rule matched tool-call arguments\. …/);
+  assert.doesNotMatch(view.container.textContent, /b">/);
+  assert.doesNotMatch(view.container.textContent, /One-line wrappers/);
+
+  fireEvent.click(header);
+  assert.equal(header.getAttribute("aria-expanded"), "true");
+  assert.match(view.container.textContent, /One-line wrappers: no real behavior/);
+  assert.doesNotMatch(view.container.textContent, /<system-reminder/);
+
+  fireEvent.click(header);
+  assert.doesNotMatch(view.container.textContent, /One-line wrappers/);
+});
+
+test("passive tool context from a session file renders on the batch's last tool card", () => {
+  const at = "2026-01-01T00:00:00.000Z";
+  const entry = (id, parentId, message) => ({ type: "message", id, parentId, timestamp: at, message });
+  const { messages } = buildSessionContext([
+    entry("u1", null, { role: "user", content: "look around" }),
+    entry("a1", "u1", {
+      role: "assistant", provider: "t", model: "m",
+      content: [
+        { type: "toolCall", id: "call-1", name: "read", arguments: { path: "a.ts" } },
+        { type: "toolCall", id: "call-2", name: "bash", arguments: { command: "ls" } },
+      ],
+    }),
+    entry("r1", "a1", { role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "a" }] }),
+    entry("r2", "r1", { role: "toolResult", toolCallId: "call-2", toolName: "bash", content: [{ type: "text", text: "b" }] }),
+    entry("d1", "r2", {
+      role: "developer", attribution: "agent", passiveToolContext: true, timestamp: 1,
+      content: [{ type: "text", text: "\x1b[2mTreat\tthis result\nas authoritative.\x1b[0m" }],
+    }),
+    entry("d2", "d1", { role: "developer", content: [{ type: "text", text: "Unmarked steering note." }], timestamp: 2 }),
+    entry("a2", "d2", { role: "assistant", provider: "t", model: "m", content: [{ type: "text", text: "Done." }] }),
+  ]);
+  const toolResults = collectToolResults(messages);
+  const html = (message) => renderToStaticMarkup(React.createElement(MessageView, { message, toolResults, toolCallsDefaultCollapsed: false }));
+  // Expanded tool group, collapsed cards: one truncating row on the last card, the full text on hover.
+  const shown = html(messages[1]);
+  assert.equal(shown.match(/>Context:/g)?.length, 1);
+  assert.match(shown, /class="activity-row-secondary" title="Context: Treat\tthis result\nas authoritative\."><span aria-hidden="true">↳ <\/span>Context: Treat\tthis result\nas authoritative\./);
+  assert.ok(shown.indexOf(">read<") < shown.indexOf(">bash<"));
+  assert.ok(shown.indexOf("Context:") > shown.indexOf(">bash<"), "the line sits on the last card (call-2)");
+  assert.doesNotMatch(shown, /tool-call-context/);
+  // An expanded card shows the full text as its own segment at the end of its details instead.
+  const single = { ...messages[1], content: [messages[1].content[1]] };
+  const view = render(React.createElement(MessageView, { message: single, toolResults }));
+  fireEvent.click(view.getByRole("button", { expanded: false }));
+  const segment = view.container.querySelector(".tool-call-details .tool-call-context");
+  assert.equal(segment?.textContent, "↳ Context: Treat\tthis result\nas authoritative.");
+  assert.equal(view.container.querySelector(".activity-row-secondary[title]"), null, "no truncated row while expanded");
+  // A harness wrapper (omp's rule reminders) becomes a label instead of raw tag text.
+  const wrapped = new Map(toolResults);
+  wrapped.set("call-2", { ...toolResults.get("call-2"), passiveContext: '<system-reminder reason="rule_violation" rule="ts-set-map">\nUse a Record.\n</system-reminder>' });
+  const labeled = renderToStaticMarkup(React.createElement(MessageView, { message: single, toolResults: wrapped }));
+  assert.match(labeled, /↳ <\/span>Context \(rule_violation · ts-set-map\): Use a Record\.<\/div>/);
+  assert.doesNotMatch(labeled, /system-reminder/);
+  // The length cap can cut the closing tag; the opening tag still never leaks.
+  wrapped.set("call-2", { ...toolResults.get("call-2"), passiveContext: '<system-reminder reason="" rule="ts-set-map">\nUse a Rec' });
+  const cut = renderToStaticMarkup(React.createElement(MessageView, { message: single, toolResults: wrapped }));
+  assert.match(cut, /↳ <\/span>Context \(ts-set-map\): Use a Rec<\/div>/);
+  assert.doesNotMatch(cut, /system-reminder/);
+  // The marked message is no row of its own; the unmarked one still is.
+  assert.equal(messages[4].customType, "passive-tool-context");
+  assert.equal(html(messages[4]), "");
+  assert.equal(messages[5].customType, "developer");
+  assert.equal(messages[5].display, true);
+  assert.match(html(messages[5]), /Unmarked steering note\./);
+  assert.deepEqual(
+    planTranscriptRows(messages)[0].segments.map((segment) => segment.kind === "text" ? "text" : segment.pieces.map((piece) => piece.index)),
+    [[1, 5], "text"],
+  );
+});
+
+test("a deferred thinking block rendered from a block subset loads its source block", async (t) => {
+  const requested = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    return new Response(JSON.stringify({ thinking: "loaded" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const view = render(React.createElement(MessageView, {
+    message: { role: "assistant", provider: "t", model: "m", content: [{ type: "thinking", thinking: "", deferred: true }] },
+    sessionId: "s1",
+    entryId: "e1",
+    sourceBlockIndices: [2],
+  }));
+  await act(async () => { fireEvent.click(view.container.querySelector(".activity-row-trigger")); });
+  assert.equal(requested.length, 1);
+  assert.match(requested[0], /\/entries\/e1\/thinking\?blockIndex=2$/);
+});
+
+test("thinking blocks stay collapsed by default and open with the expand preference", async () => {
+  const message = {
+    role: "assistant",
+    provider: "t",
+    model: "m",
+    content: [{ type: "thinking", thinking: "weighing the options" }, { type: "text", text: "Answer" }],
+  };
+  const html = (props) => renderToStaticMarkup(React.createElement(MessageView, { message, ...props }));
+  // Default (off): unchanged behavior — the reasoning text is not rendered.
+  assert.doesNotMatch(html({}), /weighing the options/);
+  assert.doesNotMatch(html({ expandThinkingByDefault: false }), /weighing the options/);
+  // On: the block is open on mount, so reading reasoning needs no clicks.
+  assert.match(html({ expandThinkingByDefault: true }), /weighing the options/);
+  // The same initial state covers a streaming block on purpose (see ThinkingBlock):
+  // the reasoning the preference is meant to expose is the one being written.
+  assert.match(html({ expandThinkingByDefault: true, isStreaming: true }), /weighing the options/);
+});
+
+test("an expanded thinking block collapses and re-expands by hand", async () => {
+  const message = {
+    role: "assistant",
+    provider: "t",
+    model: "m",
+    content: [{ type: "thinking", thinking: "weighing the options" }],
+  };
+  const view = render(React.createElement(MessageView, { message, expandThinkingByDefault: true }));
+  const output = () => view.container.querySelector(".thinking-output")?.textContent;
+  assert.equal(output(), "weighing the options");
+  const trigger = view.container.querySelector(".activity-row-trigger");
+  await act(async () => { fireEvent.click(trigger); });
+  assert.equal(output(), undefined);
+  await act(async () => { fireEvent.click(trigger); });
+  assert.equal(output(), "weighing the options");
+});
+
+test("a deferred thinking block auto-expanded by the preference loads its source block", async (t) => {
+  const requested = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    return new Response(JSON.stringify({ thinking: "loaded" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  // Ids of their own: loadThinkingContent caches per (session, entry, block),
+  // and the click test above already loaded s1/e1 block 2 in this process.
+  const view = render(React.createElement(MessageView, {
+    message: { role: "assistant", provider: "t", model: "m", content: [{ type: "thinking", thinking: "", deferred: true }] },
+    sessionId: "s2",
+    entryId: "e2",
+    sourceBlockIndices: [3],
+    expandThinkingByDefault: true,
+  }));
+  await waitFor(() => assert.equal(view.container.querySelector(".thinking-output")?.textContent, "loaded"));
+  assert.equal(requested.length, 1);
+  assert.match(requested[0], /\/entries\/e2\/thinking\?blockIndex=3$/);
+});
 
 test("a running tool call shows a spinner instead of the no-result marker", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
@@ -497,9 +782,8 @@ test("expanded edit results with a patch render the split diff view", () => {
   assert.doesNotMatch(html, /<pre/);
 });
 
-test("consecutive tool calls group into an activity group summary", () => {
+test("parallel tool calls each render as their own row, never a merged group", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
-    isStreaming: true,
     toolCallsDefaultCollapsed: true,
     message: {
       role: "assistant",
@@ -511,24 +795,8 @@ test("consecutive tool calls group into an activity group summary", () => {
     },
   }));
 
-  assert.match(html, /activity-group/);
-  assert.match(html, /Read 2 files and searched 1 time/);
-});
-
-test("bash (local) rows count as terminal commands in group summaries", () => {
-  const html = renderToStaticMarkup(React.createElement(MessageView, {
-    isStreaming: true,
-    toolCallsDefaultCollapsed: true,
-    message: {
-      role: "assistant",
-      content: [
-        { type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "go vet ./..." } },
-        { type: "toolCall", toolCallId: "call-2", toolName: "bash (local)", input: { command: "go test ./..." } },
-      ],
-    },
-  }));
-
-  assert.match(html, /Ran 2 commands/);
+  assert.equal(html.match(/class="activity-row-trigger"/g)?.length, 3);
+  for (const target of ["a.ts", "b.ts", "test"]) assert.match(html, new RegExp(target));
 });
 
 test("todo tool calls render clean status badge with action and task name", () => {
@@ -615,7 +883,7 @@ test("interrupted message with partial content renders content before interrupte
 
 const FORK_LABEL = "Fork a new session from this point";
 
-test("agent replies offer copy and fork, forking at the turn's user message", async (t) => {
+test("agent replies offer copy and fork at their resolved target", async (t) => {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   t.after(() => {
@@ -626,13 +894,15 @@ test("agent replies offer copy and fork, forking at the turn's user message", as
   const view = render(React.createElement(MessageView, {
     message: { role: "assistant", model: "test", provider: "test", content: [{ type: "text", text: "Done." }] },
     entryId: "assistant-1",
-    // Resolved by resolveForkEntryIds: omp's `branch` accepts a user entry only.
+    // Resolved by resolveForkTargets: the newest reply falls back to its own
+    // turn's prompt with edit-and-resend.
     forkEntryId: "user-1",
-    onFork: (entryId) => forked.push(entryId),
+    forkEditsPrompt: true,
+    onFork: (entryId, editPrompt) => forked.push([entryId, editPrompt]),
   }));
   assert.ok(view.getByRole("button", { name: "Copy message" }));
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
-  assert.deepEqual(forked, ["user-1"]);
+  assert.deepEqual(forked, [["user-1", true]]);
   view.unmount();
 });
 
@@ -656,6 +926,8 @@ test("a streaming reply and an unforkable row keep no fork action", () => {
     message: reply, entryId: "assistant-3", forkEntryId: "user-1", onFork: () => {}, isStreaming: true,
   }));
   assert.doesNotMatch(streaming, new RegExp(`aria-label="${FORK_LABEL}"`));
+  assert.doesNotMatch(streaming, /aria-label="Copy message"/);
+  assert.doesNotMatch(streaming, /aria-label="Read aloud"/);
 
   const noTarget = renderToStaticMarkup(React.createElement(MessageView, {
     message: reply, entryId: "assistant-4", onFork: () => {},
@@ -663,7 +935,7 @@ test("a streaming reply and an unforkable row keep no fork action", () => {
   assert.doesNotMatch(noTarget, new RegExp(`aria-label="${FORK_LABEL}"`));
 });
 
-test("user messages still fork at their own entry", async (t) => {
+test("user messages fork at their own entry and edit the prompt", async (t) => {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   t.after(() => {
@@ -675,9 +947,9 @@ test("user messages still fork at their own entry", async (t) => {
     message: { role: "user", content: "Keep this forkable." },
     entryId: "user-7",
     forkEntryId: "user-7",
-    onFork: (entryId) => forked.push(entryId),
+    onFork: (entryId, editPrompt) => forked.push([entryId, editPrompt]),
   }));
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
-  assert.deepEqual(forked, ["user-7"]);
+  assert.deepEqual(forked, [["user-7", true]]);
   view.unmount();
 });

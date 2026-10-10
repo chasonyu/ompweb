@@ -1,11 +1,14 @@
 import { execFile } from "child_process";
 import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
+import { createChildProcessEnvironment } from "../project-command-env";
+import { isUpdateDisabled } from "../update-policy";
 
 export interface OmpUpdateStatus {
   currentVersion: string | null;
   availableVersion: string | null;
   updateAvailable: boolean;
   updateCommand: string;
+  updatesDisabled?: boolean;
 }
 
 export const OMP_UPDATE_CHECK_TIMEOUT_MS = 15_000;
@@ -21,7 +24,7 @@ export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOU
   execFile(target.file, target.args, {
     timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
-    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+    env: createChildProcessEnvironment({ FORCE_COLOR: "0", NO_COLOR: "1" }),
     windowsHide: true,
   }, (error, stdout, stderr) => {
     if (error) reject(new Error((stderr || stdout || error.message).trim().slice(-1000)));
@@ -76,6 +79,9 @@ export function createCachedOmpUpdateCheck(
 const defaultCachedOmpUpdateCheck = createCachedOmpUpdateCheck();
 
 export async function checkOmpUpdate(force = false): Promise<OmpUpdateStatus> {
+  if (isUpdateDisabled()) {
+    return { currentVersion: null, availableVersion: null, updateAvailable: false, updateCommand: "omp update", updatesDisabled: true };
+  }
   return defaultCachedOmpUpdateCheck(force);
 }
 

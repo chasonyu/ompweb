@@ -29,6 +29,66 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 - [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
 - Node.js `>= 22.19.0`
 
+The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
+
+Queue **Delete** and **Edit** additionally require `remove_queued_message`. Deletion is confirmed by OMP before the chip disappears; editing recalls text only after cancellation succeeds. Unsupported runtimes or messages that are no longer pending leave the queue unchanged and display a notice.
+
+The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events, omp 18.4.4 or later), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs. Older omp runtimes show no queue panel, and Stop cannot take queued messages back.
+
+## App installation behind authentication
+
+To install the web app, sign in first and use your browser's installation menu.
+The single manifest link requests `/api/manifest` with credentials; that endpoint
+uses the existing web-password guard and private, revalidating caching. Its
+192×192 and 512×512 PNG icons are embedded from the packaged assets because
+Android's native installer fetches ordinary icon URLs without authentication
+cookies. The app still launches at `/` with scope `/`.
+
+Keep Cloudflare Access and application authentication enabled; no public
+manifest exception or Access bypass rule is needed. This does not add offline
+support. Local Chromium verification covered cookie-gated metadata with HTTP
+icon URLs blocked (zero installability errors). The owner also confirmed that
+installation on a physical phone works as expected behind Cloudflare Access.
+
+Skill startup notices require an OMP runtime with `get_skill_diagnostics`,
+`set_skill_startup_diagnostics`, and `skill_diagnostics_update`. Conflicts and
+redundant installations appear above the composer when its OMP session starts;
+an empty new-chat page does not start OMP just for diagnostics. **Details** shows
+the resolved default, variants, identical copies, backing paths, sources, and
+selection reason. The **×** button dismisses the notice for that session until
+the diagnostic report changes. **Turn off** and **Settings →
+Interface & Behavior → Skill startup notices** use OMP's persisted
+`skills.showStartupDiagnostics` preference, not a separate browser setting.
+**Settings → Extensions & Tools → Skills → View skill diagnostics** remains
+available for a selected running session when notices are off. Inspection does
+not resume stopped sessions. Missing support or no running session is unavailable,
+not a clean result.
+
+## Notifications
+
+Turn on notifications in **Settings → Notifications**. Each browser keeps its own
+settings: which events notify (task finished, waiting for input, run failed,
+model switched automatically) and what happens while you use omp-web in another
+tab (an in-app toast, or always a system notification). Nothing is shown for the
+session you are viewing. Clicking a notification opens its session.
+
+- **Push** reaches the browser even when no omp-web tab is open. It needs a
+  secure context (HTTPS through your reverse proxy, or `localhost`), and the
+  omp-web server needs outbound HTTPS access to the browser vendors' push
+  services. omp-web generates its push (VAPID) keys on first use and stores them
+  with the device list in `~/.omp/agent/omp-web/notifications.json` (mode 0600).
+- On **iPhone and iPad** (iOS 16.4 or later), push works only in the app added
+  to the Home Screen.
+- In a secure context without push support, system notifications appear while
+  an omp-web tab is open. Over plain HTTP on a non-localhost address, browsers
+  allow no system notifications: only the in-app toasts shown while you use
+  omp-web remain.
+- Desktop browsers show notifications through the operating system's
+  notification center. Push delivery needs the browser process running.
+
+Completion notifications use omp's `prompt_result` and `session_settled` RPC
+frames (omp 18.3.1 or later).
+
 ## Quick Start
 
 **Run directly without installing:**
@@ -56,7 +116,7 @@ Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
 ```bash
 ompweb --port 8080                         # Custom port
 ompweb --hostname 0.0.0.0                  # Listen on network
-ompweb --password "your-password"          # Enable password protection
+ompweb hash-password                       # Print the value for OMP_WEB_PASSWORD_HASH
 ompweb --no-open                           # Don't auto-open the browser
 ompweb --install-tray                      # Install Windows System Tray service & Desktop shortcuts
 ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
@@ -65,6 +125,39 @@ ompweb systemd install                     # Install Linux systemd user service
 ompweb --help                              # Show help
 ompweb --version                           # Show version
 ```
+
+### Password protection
+
+omp-web **never reads a plaintext password**. A password in `OMP_WEB_PASSWORD`
+or passed as `--password` stops the server at startup, because every `omp`
+session inherits the server's environment: an agent running `env` would print
+the password into its session file and send it to the model provider.
+
+Generate a hash instead and give that to the server:
+
+```bash
+ompweb hash-password                       # asks twice, input hidden
+echo "a-long-random-password" | ompweb hash-password   # or pipe it in
+
+OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' ompweb
+```
+
+`ompweb hash-password` reads the password from stdin — never from a command
+line argument — so it stays out of your shell history and out of `ps` output.
+The hash is scrypt (N = 2^15, r = 8, p = 1) with a fresh 16-byte salt, printed
+in the self-describing form `scrypt$<ln>$<r>$<p>$<salt>$<digest>`. Anyone who
+reads the hash cannot sign in with it, and it cannot be turned back into the
+password.
+
+Sessions are not signed with the password hash. A random signing key is created
+on first start in `~/.omp/agent/omp-web/web-auth-secret.json` (mode `0600`) and
+mixed with the hash, so changing the password still signs everyone out while the
+stored hash alone is never enough to forge a session.
+
+The service installers (`ompweb systemd install`, `ompweb-launchd install`, the
+Linux tray, and the Windows service) still accept `OMP_WEB_PASSWORD` at install
+time and hash it before writing it to their configuration. Only the hash is
+stored.
 
 ### Run as a Windows Service (System Tray)
 
@@ -109,14 +202,18 @@ As a service, the browser is **not** auto-opened by default — install with
 OMP_WEB_PASSWORD=secret npx --yes @kahme247/ompweb@latest ompweb-launchd install
 ```
 
-When binding to a non-loopback host, require authentication (`OMP_WEB_PASSWORD`
+`OMP_WEB_PASSWORD` is hashed at install time; the plist holds the hash, never
+the password. Pass `OMP_WEB_PASSWORD_HASH` to install a hash you generated with
+`ompweb hash-password`.
+
+When binding to a non-loopback host, require authentication (`OMP_WEB_PASSWORD_HASH`
 or equivalent access control) and HTTPS through a trusted reverse proxy or VPN.
 Never expose the unauthenticated web UI or send its password/session cookie over
 plaintext HTTP.
 
 Logs go to `~/Library/Logs/ompweb/ompweb.log` and the plist lives at
-`~/Library/LaunchAgents/com.kahme247.ompweb.plist` (mode 600; a configured
-password is stored there in plain text).
+`~/Library/LaunchAgents/com.kahme247.ompweb.plist` (mode 600; the password
+hash — not the password — is stored there).
 
 ### Run as a Linux Service (systemd)
 
@@ -138,6 +235,8 @@ OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD='change-me' \
   npx --yes --package=@kahme247/ompweb@latest ompweb-systemd install
 ```
 
+The password is hashed before it is written to `web-service.env`.
+
 Manage it with:
 
 ```bash
@@ -149,7 +248,8 @@ npx --yes --package=@kahme247/ompweb@latest ompweb-systemd uninstall # Stop and 
 The service runs the locally installed `ompweb` binary resolved at install time
 (override with `OMP_WEB_SYSTEMD_BIN`). Runtime configuration lives in
 `~/.omp/agent/web-service.env` — the tray (or any editor) can change the port,
-hostname, and password there and just restart the service; no reinstall needed.
+hostname, and password hash there and just restart the service; no reinstall
+needed.
 Install-time [environment variables](#environment-variables) are baked into
 that file. As a service, the browser is **not** auto-opened by default. The
 unit lives at `~/.config/systemd/user/ompweb.service` and logs go to the
@@ -182,7 +282,7 @@ npx --yes @kahme247/ompweb@latest ompweb-tray --uninstall    # Remove autostart,
 **Expose to Network** rebinds the service from `127.0.0.1` to `0.0.0.0` so the
 web UI is reachable from your LAN or VPN (e.g. Tailscale). Leaving loopback
 requires a web password — the tray prompts for one via `kdialog`/`zenity` when
-needed. **Change Port…** and **Set Web Password…** edit
+needed, and stores its hash. **Change Port…** and **Set Web Password…** edit
 `~/.omp/agent/web-service.env` and restart the service. When binding to a
 non-loopback host, use HTTPS through a trusted reverse proxy or VPN for remote
 access.
@@ -195,7 +295,7 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 
 - **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
 - **Message Copy**: Copy user messages and completed assistant replies as rendered plain text or original Markdown using the buttons below each message. Thinking, tool output, and message controls are excluded. Oversized messages that use the raw-text viewer copy their full source in either format.
-- **Queue Deletion Confirmation**: Preview and confirm before removing queued follow-ups or steered messages from the queue panel. This does not cancel delivery already queued inside OMP.
+- **Queue Deletion Confirmation**: Preview and confirm before cancelling queued follow-ups or steered messages in OMP. Requires native `remove_queued_message` support; already-delivered messages cannot be recalled.
 - **Session Management**: Browse past conversations by project, fork sessions, branch within a session, archive/restore, import session files, and deep-link via URL.
 - **Draft Recovery**: Unsent text stays scoped to its conversation or new-session workspace and is restored after Back/Forward navigation or reload in the same tab when browser storage is available (up to 50 drafts). Images and file attachments remain in memory only.
 - **Live Plans & Subagents**: Collapsible panels pinned above the composer track live todo phases and running subagents (status, tool, retries, tokens/cost, nested tasks) with transcript dialogs and history recovery.
@@ -206,7 +306,8 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 - **Windows System Tray & Service**: Background service, tray icon, logon autostart, and Desktop/Start Menu shortcuts (Windows).
 - **macOS launchd Service**: LaunchAgent that starts at login, restarts on crash, and logs under `~/Library/Logs/ompweb`.
 - **Linux systemd Service & Tray**: User service that starts at login and restarts on crash, plus a StatusNotifierItem tray icon with service controls (KDE Plasma and compatible desktops).
-- **Web-based Settings** (8 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), System & Updates.
+- **Notifications**: Desktop and mobile (PWA) notifications for finished tasks, questions waiting for an answer, failed runs, and automatic model switches, with Web Push when served over HTTPS. See [Notifications](#notifications).
+- **Web-based Settings** (10 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), Notifications, System & Updates.
 - **Slash Commands & Shortcuts**: Quick prompts (`/plan`, `/review`, `/fix`, `/test`, etc.), `⌘K` / `Ctrl+K` palette, and model/reasoning cycling.
 - **UI Themes & Localization**: Warm paper light/dark themes plus an omp.sh-inspired midnight (`omp`) theme, chat font size & interface scale, with full English, Chinese (简体中文), and Japanese (日本語) translations.
 
@@ -216,13 +317,18 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 | --- | --- | --- |
 | `PORT` | Server port | `30177` |
 | `OMP_WEB_HOSTNAME` | Server bind host | `127.0.0.1` |
-| `OMP_WEB_PASSWORD` | Optional password for web login | _None (auth disabled)_ |
+| `OMP_WEB_PASSWORD_HASH` | Optional scrypt hash of the web login password, from `ompweb hash-password`. Required for a non-loopback bind | _None (auth disabled)_ |
 | `OMP_WEB_NO_OPEN` | Set to `1` to prevent auto-opening browser | `0` |
+| `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
+| `OMP_WEB_NAME` | Name shown in browser tabs and installed-app names. `url`, `host` or `domain` (any case) uses the hostname the browser connected to, without port; localhost and IP addresses keep `omp web`. Any other value is used as-is. Restart after changing | `omp web` |
 | `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
+| `OMP_WEB_DEV_ORIGIN` | Additional allowed hostname for the development server (no scheme or port); ignored in production | _None_ |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL | _None (disabled)_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
 | `OMP_WEB_STT_MODEL` | Optional model name for the STT endpoint | _None_ |
+
+**`OMP_WEB_NAME` and installed apps.** An installed app (PWA) is usually named after the page it was installed from. If you later change `OMP_WEB_NAME`, or reach omp-web through a different address while `OMP_WEB_NAME` is `url`, `host` or `domain`, your operating system may rename the installed app as well. Leave `OMP_WEB_NAME` empty, or set a name that identifies this omp-web server whatever domain name or address is used to reach it.
 
 ## Development
 
@@ -234,6 +340,19 @@ npm run dev
 ```
 
 The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178).
+
+The development server allows loopback and RFC1918 private IPv4 origins
+(`10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`). When using a tunnel
+or reverse proxy with a custom hostname, set it without editing `next.config.ts`:
+
+```bash
+OMP_WEB_DEV_ORIGIN=dev.example.com npm run dev
+```
+
+For a persistent setup, set the variable in your local environment or service
+configuration and restart the dev server. This does not change the bind address
+or enable authentication. Next.js hostname patterns cannot express IPv6 CIDRs;
+a private IPv6 origin must be supplied explicitly (for example, `[fd00::1]`).
 
 ### Checks
 

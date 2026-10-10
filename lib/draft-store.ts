@@ -16,10 +16,39 @@ export interface ChatDraft {
   files: ChatDraftFile[];
 }
 
+/** Content to put back in a composer. `replace` merges a later recovery with
+ *  an earlier one in order: while the draft still starts with `lead` (the
+ *  earlier block), it becomes `text`; otherwise only `fallback` is prepended.
+ *  `images` are appended to the draft's attachments. */
+export interface DraftRecovery {
+  text: string;
+  replace?: { lead: string; fallback: string };
+  images?: ChatDraftImage[];
+}
+
+/** The `{ data, mimeType }` images in an omp RPC payload; anything else is dropped. */
+export function toDraftImages(value: unknown): ChatDraftImage[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((image: unknown) => (
+    image && typeof image === "object" && "data" in image && "mimeType" in image
+      && typeof image.data === "string" && typeof image.mimeType === "string"
+      ? [{ data: image.data, mimeType: image.mimeType }]
+      : []
+  ));
+}
+
+export function mergeRecoveredText(current: string, { text, replace }: DraftRecovery): string {
+  if (!text) return current;
+  if (replace && current.startsWith(replace.lead)) return text + current.slice(replace.lead.length);
+  const lead = replace ? replace.fallback : text;
+  return current ? `${lead}\n\n${current}` : lead;
+}
+
 // globalThis so dev Fast Refresh doesn't wipe drafts mid-typing.
 declare global {
   var __ompChatDrafts: Map<string, ChatDraft> | undefined;
   var __ompChatDraftListeners: Set<() => void> | undefined;
+  var __ompChatDraftRecoveryListeners: Set<(key: string, recovery: DraftRecovery) => void> | undefined;
 }
 
 const MAX_DRAFTS = 50;
@@ -51,6 +80,7 @@ function readStoredDrafts(): Map<string, ChatDraft> {
 }
 
 const listeners = (globalThis.__ompChatDraftListeners ??= new Set<() => void>());
+const recoveryListeners = (globalThis.__ompChatDraftRecoveryListeners ??= new Set<(key: string, recovery: DraftRecovery) => void>());
 
 export function hasUnsentDrafts(): boolean {
   return drafts.size > 0;
@@ -59,6 +89,11 @@ export function hasUnsentDrafts(): boolean {
 export function subscribeDrafts(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
+}
+
+export function subscribeDraftRecovery(listener: (key: string, recovery: DraftRecovery) => void): () => void {
+  recoveryListeners.add(listener);
+  return () => { recoveryListeners.delete(listener); };
 }
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
@@ -76,6 +111,20 @@ function isEmptyDraft(draft: ChatDraft): boolean {
 export function getDraft(key: string): ChatDraft | null {
   const draft = drafts.get(key);
   return draft ? cloneDraft(draft) : null;
+}
+
+export function recoverDraft(key: string, recovery: DraftRecovery): void {
+  if (key) {
+    const draft = getDraft(key) ?? { value: "", images: [], files: [] };
+    setDraft(key, {
+      ...draft,
+      value: mergeRecoveredText(draft.value, recovery),
+      images: [...draft.images, ...(recovery.images ?? [])],
+    });
+  }
+  // Publish the recovery intent separately: ordinary persistence must not
+  // reapply it, and the mounted composer may have React updates still queued.
+  for (const listener of recoveryListeners) listener(key, recovery);
 }
 
 export function getDraftSummary(key: string): { text: string; hasAttachments: boolean } {

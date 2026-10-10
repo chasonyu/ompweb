@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue } from "react";
-import type { ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
+import type { ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -12,26 +12,27 @@ import { toast } from "./ui/toast";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Archive, Check, ChevronRight, FileUp, Plus, RefreshCw, Search, Settings2, SlidersHorizontal } from "lucide-react";
+import { Archive, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, X } from "lucide-react";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
+import { NOTIFICATION_MESSAGE_EVENT, notificationClientId } from "@/lib/notification-client";
 import {
   EMPTY_PROJECT_SET,
   INITIAL_RESTORE_MAX_ATTEMPTS,
   INITIAL_RESTORE_RETRY_MS,
   MAX_PROJECT_SESSIONS,
   buildSessionTree,
-  displayCwd,
   loadExpandedProjects,
   loadUnreadSessionIds,
   normalizeProjectKey,
   projectLabel,
   saveExpandedProjects,
   saveUnreadSessionIds,
+  type WorktreeContext,
   type WorktreeEntry,
   type WorktreeState,
 } from "./SessionSidebar-helpers";
 import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton } from "./SessionSidebar-chrome";
-import { ProjectRow, ProjectWorktreeSwitcher } from "./SessionSidebar-rows";
+import { ProjectRow } from "./SessionSidebar-rows";
 
 /** Deadline for one /api/sessions fetch. A wedged-but-listening server never
  * answers; without this the initial spinner would pend forever. */
@@ -59,6 +60,9 @@ interface Props {
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onWorkspaceOptionsChange?: (projects: ManagedProject[], selectedProject: string | null, cwd: string | null) => void;
+  /** The active Git workspace's worktrees and actions (null when the active
+   *  workspace is not a Git top-level repo); rendered by the file panel. */
+  onWorktreeContextChange?: (ctx: WorktreeContext | null) => void;
   addProjectOpen: boolean;
   setAddProjectOpen: (open: boolean) => void;
   /** Shows the provider usage bar above Settings; toggle lives in Settings. */
@@ -69,8 +73,20 @@ interface Props {
   updateAvailable?: boolean;
   /** Opens the archived sessions browser. */
   onOpenArchive?: () => void;
+  /** In-app back/forward over visited chat views (sidebar header buttons). */
+  navigation?: {
+    canBack: boolean;
+    canForward: boolean;
+    onBack: () => void;
+    onForward: () => void;
+    /** Platform shortcut label for the tooltip, e.g. "⌘[" / "Alt+←". */
+    backShortcut: string;
+    forwardShortcut: string;
+  };
   /** True when settings full-page view is currently open. */
   settingsOpen?: boolean;
+  /** Mobile full-screen drawer only: shows a top-left close control. */
+  onClose?: () => void;
 }
 
 
@@ -78,7 +94,7 @@ interface Props {
 
 
 
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onWorkspaceOptionsChange, addProjectOpen, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, updateAvailable, settingsOpen = false }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onWorkspaceOptionsChange, onWorktreeContextChange, addProjectOpen, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, navigation, updateAvailable, settingsOpen = false, onClose }: Props) {
 
 
   const { t } = useI18n();
@@ -86,7 +102,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
-  const [homeDir, setHomeDir] = useState<string>("");
   // Managed + session-discovered projects (server-merged, hidden excluded).
   const [projects, setProjects] = useState<ManagedProject[]>([]);
   const [draggedProjectPath, setDraggedProjectPath] = useState<string | null>(null);
@@ -105,17 +120,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // keeps its own loaded Git state; a late async response for a previous repo
   // only updates that repo's entry, never the active one).
   const [worktreeStateByProject, setWorktreeStateByProject] = useState<Record<string, WorktreeState>>({});
-  const [wtDropdownOpen, setWtDropdownOpen] = useState(false);
-  const [wtNewOpen, setWtNewOpen] = useState(false);
-  const [wtNewBranch, setWtNewBranch] = useState("");
-  const [wtError, setWtError] = useState<string | null>(null);
-  const [wtBusy, setWtBusy] = useState(false);
-  const [wtConfirmRemove, setWtConfirmRemove] = useState<string | null>(null);
-  const wtToggleRef = useRef<HTMLButtonElement>(null);
-  const wtNewInputRef = useRef<HTMLInputElement>(null);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [runningSessionCwds, setRunningSessionCwds] = useState<Record<string, string>>({});
+  const [exitedSessions, setExitedSessions] = useState<Map<string, ExitedRpcSession>>(() => new Map());
   const knownRunningCwdsRef = useRef<Map<string, string>>(new Map());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
@@ -263,8 +271,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
-    // sidebar never has to poll while an agent is working.
-    const source = new EventSource("/api/agent/running/events");
+    // sidebar never has to poll while an agent is working. The same stream
+    // delivers this tab's notifications (handled by useNotifications).
+    const source = new EventSource(`/api/agent/running/events?clientId=${encodeURIComponent(notificationClientId)}`);
 
     source.onmessage = (e) => {
       try {
@@ -272,12 +281,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           type?: string;
           runningSessionIds?: string[];
           runningSessions?: Array<{ id: string; cwd: string }>;
+          exitedSessions?: ExitedRpcSession[];
           refreshSessionList?: boolean;
           sessionIds?: string[];
         };
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+          setExitedSessions(new Map((data.exitedSessions ?? []).map((session) => [session.id, session])));
           if (data.runningSessions) {
             const nextCwds: Record<string, string> = {};
             for (const rs of data.runningSessions) {
@@ -292,6 +303,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         } else if (data.type === "sessions-changed") {
           if (data.refreshSessionList) scheduleRefresh();
           publishSessionsChanged(data.sessionIds ?? []);
+        } else if (data.type === "notification") {
+          window.dispatchEvent(new CustomEvent(NOTIFICATION_MESSAGE_EVENT, { detail: data }));
         }
       } catch {
         // ignore malformed frames
@@ -361,12 +374,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     });
   }, [selectedSessionId]);
 
-
-  useEffect(() => {
-    fetch("/api/home").then((r) => r.json()).then((d: { home?: string }) => {
-      if (d.home) setHomeDir(d.home);
-    }).catch(() => {});
-  }, []);
 
   const restoredRef = useRef(false);
   /** Set once the first /api/projects fetch succeeds; guards the expansion
@@ -477,45 +484,44 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   //  • a late response for the previously-selected repo writes only that
   //    repo's entry (never the active repo's, so it can't overwrite the UI).
   const [wtRefreshKey, setWtRefreshKey] = useState(0);
+  const storeWorktreeState = useCallback((requestedCwd: string, d: { projectRoot?: string; isGit?: boolean; isTopLevel?: boolean; worktrees?: WorktreeEntry[]; error?: string }) => {
+    if (d.error || !d.projectRoot) {
+      // This cwd is not a Git repo (or the lookup failed) — the workspace
+      // should show no branch/worktrees. Other repos' cached state is left
+      // intact: a non-Git workspace never inherits another repo's branch, and
+      // we never discard previously-visited repos' Git state.
+      return;
+    }
+    const projectRoot = d.projectRoot;
+    const entry: WorktreeState = {
+      forCwd: requestedCwd,
+      projectRoot,
+      isGit: d.isGit ?? false,
+      isTopLevel: d.isTopLevel ?? false,
+      worktrees: d.worktrees ?? [],
+    };
+    setWorktreeStateByProject((prev) => {
+      const key = normalizeProjectKey(projectRoot);
+      const existing = prev[key];
+      if (existing && normalizeProjectKey(existing.projectRoot) !== key) {
+        const next = { ...prev };
+        delete next[normalizeProjectKey(existing.projectRoot)];
+        next[key] = entry;
+        return next;
+      }
+      return { ...prev, [key]: entry };
+    });
+  }, []);
   useLayoutEffect(() => {
     if (!selectedCwd) return;
     let cancelled = false;
     const requestedCwd = selectedCwd;
     fetch(`/api/worktrees?cwd=${encodeURIComponent(requestedCwd)}`)
       .then((r) => r.json())
-      .then((d: { projectRoot?: string; isGit?: boolean; isTopLevel?: boolean; worktrees?: WorktreeEntry[]; error?: string }) => {
-        if (cancelled) return;
-        if (d.error || !d.projectRoot) {
-          // This cwd is not a Git repo (or the lookup failed) — the selected
-          // workspace should show no branch/worktrees. Other repos' cached
-          // state is left intact: a non-Git workspace never inherits another
-          // repo's branch, and we never discard previously-visited repos' Git
-          // state.
-          return;
-        }
-        const projectRoot = d.projectRoot;
-        const entry: WorktreeState = {
-          forCwd: requestedCwd,
-          projectRoot,
-          isGit: d.isGit ?? false,
-          isTopLevel: d.isTopLevel ?? false,
-          worktrees: d.worktrees ?? [],
-        };
-        setWorktreeStateByProject((prev) => {
-          const key = normalizeProjectKey(projectRoot);
-          const existing = prev[key];
-          if (existing && normalizeProjectKey(existing.projectRoot) !== key) {
-            const next = { ...prev };
-            delete next[normalizeProjectKey(existing.projectRoot)];
-            next[key] = entry;
-            return next;
-          }
-          return { ...prev, [key]: entry };
-        });
-      })
+      .then((d) => { if (!cancelled) storeWorktreeState(requestedCwd, d); })
       .catch(() => { /* leave any cached state; refetch on demand */ });
     return () => { cancelled = true; };
-  }, [selectedCwd, wtRefreshKey, refreshKey]);
+  }, [selectedCwd, wtRefreshKey, refreshKey, storeWorktreeState]);
 
   // Keep a just-created session and its project visible while omp is still
   // flushing the JSONL file. The server list remains authoritative once it
@@ -553,7 +559,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     // until the file lands and the next refresh replaces the placeholder.
     const known = new Set(base.map((s) => s.id));
     const placeholders: SessionInfo[] = [];
-    for (const id of runningSessionIds) {
+    const visibleLiveIds = new Set(runningSessionIds);
+    for (const id of exitedSessions.keys()) visibleLiveIds.add(id);
+    for (const id of visibleLiveIds) {
       if (known.has(id)) continue;
       let ts = placeholderTsRef.current.get(id);
       if (!ts) {
@@ -563,6 +571,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const isOptimistic = optimisticSession?.id === id;
       const sessionCwd = (isOptimistic ? optimisticSession.cwd : null)
         ?? runningSessionCwds[id]
+        ?? exitedSessions.get(id)?.cwd
         ?? knownRunningCwdsRef.current.get(id)
         ?? selectedCwd
         ?? "";
@@ -584,21 +593,20 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         ...(phKey ? { projectKey: phKey } : {}),
       });
     }
-    // Prune timestamps and known cwds for ids that are now materialized or no longer running
+    // Prune timestamps and known cwds for ids that are now materialized or no longer live.
     if (placeholderTsRef.current.size > placeholders.length) {
       for (const key of [...placeholderTsRef.current.keys()]) {
-        if (!runningSessionIds.has(key) || known.has(key)) placeholderTsRef.current.delete(key);
+        if (!visibleLiveIds.has(key) || known.has(key)) placeholderTsRef.current.delete(key);
       }
     }
-    if (knownRunningCwdsRef.current.size > runningSessionIds.size + (optimisticSession ? 1 : 0)) {
-      const activeIds = new Set(runningSessionIds);
-      if (optimisticSession) activeIds.add(optimisticSession.id);
+    if (knownRunningCwdsRef.current.size > visibleLiveIds.size + (optimisticSession ? 1 : 0)) {
+      if (optimisticSession) visibleLiveIds.add(optimisticSession.id);
       for (const key of [...knownRunningCwdsRef.current.keys()]) {
-        if (!activeIds.has(key) && known.has(key)) knownRunningCwdsRef.current.delete(key);
+        if (!visibleLiveIds.has(key) && known.has(key)) knownRunningCwdsRef.current.delete(key);
       }
     }
     return placeholders.length ? [...base, ...placeholders] : base;
-  }, [allSessions, optimisticSession, optimisticProjectRoot, runningSessionIds, runningSessionCwds, projectRootFor, selectedCwd]);
+  }, [allSessions, optimisticSession, optimisticProjectRoot, runningSessionIds, runningSessionCwds, exitedSessions, projectRootFor, selectedCwd]);
   const visibleProjects = useMemo(() => {
     let base = projects;
     const hasOpt = optimisticProjectRoot ? base.some((p) => comparableProjectPath(p.path) === comparableProjectPath(optimisticProjectRoot)) : false;
@@ -609,11 +617,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     // (new session's cwd wasn't registered as a project). Keep that workspace
     // visible so the placeholder row has a bucket to render in.
     const knownFolded = new Set(base.map((p) => comparableProjectPath(p.path)));
-    for (const id of runningSessionIds) {
+    const visibleLiveIds = new Set(runningSessionIds);
+    for (const id of exitedSessions.keys()) visibleLiveIds.add(id);
+    for (const id of visibleLiveIds) {
       if (allSessions.some((s) => s.id === id)) continue;
       const isOptimistic = optimisticSession?.id === id;
       const sessionCwd = (isOptimistic ? optimisticSession.cwd : null)
         ?? runningSessionCwds[id]
+        ?? exitedSessions.get(id)?.cwd
         ?? knownRunningCwdsRef.current.get(id)
         ?? selectedCwd
         ?? "";
@@ -627,14 +638,17 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       }
     }
     return base;
-  }, [optimisticProjectRoot, projects, runningSessionIds, runningSessionCwds, allSessions, optimisticSession, projectRootFor, selectedCwd]);
+  }, [optimisticProjectRoot, projects, runningSessionIds, runningSessionCwds, exitedSessions, allSessions, optimisticSession, projectRootFor, selectedCwd]);
 
   // ---- Derived project list ---------------------------------------------------
   const selectedProject = useMemo(() => projectRootFor(selectedCwd), [projectRootFor, selectedCwd]);
   // While a fresh optimistic/placeholder is pending (JSONL not yet on disk),
   // freeze ordering so the new project row does not flicker optimistic ->
   // confirmed position. New projects are allowed to append at the end.
-  const hasPendingNewSession = Boolean(optimisticSession || [...runningSessionIds].some((id) => !allSessions.some((ss) => ss.id === id)));
+  const hasPendingNewSession = Boolean(
+    optimisticSession
+    || [...runningSessionIds, ...exitedSessions.keys()].some((id) => !allSessions.some((session) => session.id === id)),
+  );
   const sortedProjectsBase = useMemo(() => sortManagedProjects(visibleProjects), [visibleProjects]);
   const sortedProjectsRef = useRef<ManagedProject[] | null>(null);
   const sortedProjects = useMemo(() => {
@@ -656,8 +670,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     [sortedProjects, visibleSessions],
   );
   const projectActivity = useMemo(
-    () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds),
-    [visibleSessions, runningSessionIds, unreadSessionIds],
+    () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions.keys()),
+    [visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions],
   );
 
   // Client-side filtering (Workspaces header: search + "running only").
@@ -898,114 +912,78 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [removeProjectPath, selectedProject, sortedProjects, collapseProject, loadProjects]);
 
-  const handleCreateWorktree = useCallback(async () => {
-    const branch = wtNewBranch.trim();
-    // Operate against the active repo's own cached Git state — never a
-    // globally stored path, so the branch is created in the correct repo.
+  // Create/remove operate against the active repo's own cached Git state —
+  // never a globally stored path, so the branch lands in the correct repo.
+  // Failures reject with a user-facing message for the Worktrees tab to show.
+  const handleCreateWorktree = useCallback(async (branch: string) => {
     const activeState = selectedProject ? worktreeStateByProject[normalizeProjectKey(selectedProject)] : undefined;
-    if (!branch || wtBusy || !activeState) return;
+    if (!activeState) return;
     const root = activeState.projectRoot;
-    setWtBusy(true);
-    setWtError(null);
-    try {
-      const res = await fetch("/api/worktrees", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: root, branch }),
-      });
-      const data = await res.json().catch(() => ({})) as { path?: string; error?: string; code?: string };
-      if (!res.ok || data.error || !data.path) {
-        setWtError(formatApiError({ ...data, error: data.error ?? `HTTP ${res.status}` }));
-        return;
-      }
-      const newWorktreePath: string = data.path;
-      setWtNewOpen(false);
-      setWtNewBranch("");
-      setWtDropdownOpen(false);
-      // Optimistically register the new worktree against THIS repo's cached
-      // entry so projectRootFor() resolves it to the main repo before the
-      // refetch lands (keeps AppShell from treating the new cwd as a different
-      // project). Other repos' cached state is untouched.
-      setWorktreeStateByProject((prev) => {
-        const key = normalizeProjectKey(root);
-        const existing = prev[key];
-        if (!existing) return prev;
-        const newWt: WorktreeEntry = { path: newWorktreePath, branch, isMain: false };
-        return { ...prev, [key]: { ...existing, forCwd: newWorktreePath, worktrees: [...existing.worktrees, newWt] } };
-      });
-      setSelectedCwd(newWorktreePath);
-      setWtRefreshKey((k) => k + 1);
-      loadSessions(false);
-      void loadProjects();
-    } catch (e) {
-      setWtError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setWtBusy(false);
+    const res = await fetch("/api/worktrees", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: root, branch }),
+    });
+    const data = await res.json().catch(() => ({})) as { path?: string; error?: string; code?: string };
+    if (!res.ok || data.error || !data.path) {
+      throw new Error(formatApiError({ ...data, error: data.error ?? `HTTP ${res.status}` }));
     }
-  }, [wtNewBranch, wtBusy, selectedProject, worktreeStateByProject, loadProjects, loadSessions]);
+    const newWorktreePath: string = data.path;
+    // Optimistically register the new worktree against THIS repo's cached
+    // entry so projectRootFor() resolves it to the main repo before the
+    // refetch lands (keeps AppShell from treating the new cwd as a different
+    // project). Other repos' cached state is untouched.
+    setWorktreeStateByProject((prev) => {
+      const key = normalizeProjectKey(root);
+      const existing = prev[key];
+      if (!existing) return prev;
+      const newWt: WorktreeEntry = { path: newWorktreePath, branch, isMain: false };
+      return { ...prev, [key]: { ...existing, forCwd: newWorktreePath, worktrees: [...existing.worktrees, newWt] } };
+    });
+    setSelectedCwd(newWorktreePath);
+    setWtRefreshKey((k) => k + 1);
+    loadSessions(false);
+    void loadProjects();
+  }, [selectedProject, worktreeStateByProject, loadProjects, loadSessions]);
 
-  const handleRemoveWorktree = useCallback(async (path: string, force: boolean) => {
-    // Remove only from the active repo's own cached Git state.
+  const handleRemoveWorktree = useCallback(async (path: string, force: boolean): Promise<"removed" | "dirty"> => {
     const activeState = selectedProject ? worktreeStateByProject[normalizeProjectKey(selectedProject)] : undefined;
-    if (!activeState || wtBusy) return;
+    if (!activeState) return "removed";
     const root = activeState.projectRoot;
-    setWtBusy(true);
-    setWtError(null);
-    try {
-      const res = await fetch("/api/worktrees", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: root, path, force }),
-      });
-      const data = await res.json().catch(() => ({})) as { error?: string; dirty?: boolean; code?: string };
-      if (!res.ok) {
-        if (data.dirty && !force) {
-          // Dirty worktree — ask the user to confirm a force removal
-          setWtConfirmRemove(path);
-          return;
-        }
-        setWtError(formatApiError({ ...data, error: data.error ?? `HTTP ${res.status}` }));
-        return;
-      }
-      setWtConfirmRemove(null);
-      // Optimistically remove the deleted worktree from the active project's state
-      setWorktreeStateByProject((prev) => {
-        const key = normalizeProjectKey(root);
-        const existing = prev[key];
-        if (!existing) return prev;
-        const nextWorktrees = existing.worktrees.filter((w) => comparableProjectPath(w.path) !== comparableProjectPath(path));
-        return {
-          ...prev,
-          [key]: {
-            ...existing,
-            forCwd: selectedCwd !== null && comparableProjectPath(selectedCwd) === comparableProjectPath(path) ? root : existing.forCwd,
-            worktrees: nextWorktrees,
-          },
-        };
-      });
-      if (selectedCwd !== null && comparableProjectPath(selectedCwd) === comparableProjectPath(path)) {
-        setSelectedCwd(root);
-      }
-      setWtRefreshKey((k) => k + 1);
-      loadSessions(false);
-      void loadProjects();
-    } catch (e) {
-      setWtError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setWtBusy(false);
+    const res = await fetch("/api/worktrees", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: root, path, force }),
+    });
+    const data = await res.json().catch(() => ({})) as { error?: string; dirty?: boolean; code?: string };
+    if (!res.ok) {
+      // Dirty worktree — the caller asks the user to confirm a force removal.
+      if (data.dirty && !force) return "dirty";
+      throw new Error(formatApiError({ ...data, error: data.error ?? `HTTP ${res.status}` }));
     }
-  }, [selectedProject, worktreeStateByProject, wtBusy, selectedCwd, loadProjects, loadSessions]);
-
-  // Reset the worktree dropdown's transient state (used by the portaled
-  // dropdown's outside-press/Escape close, the branch toggle, and worktree
-  // selection).
-  const closeWorktreeDropdown = useCallback(() => {
-    setWtDropdownOpen(false);
-    setWtNewOpen(false);
-    setWtNewBranch("");
-    setWtError(null);
-    setWtConfirmRemove(null);
-  }, []);
+    // Optimistically remove the deleted worktree from the active project's state
+    setWorktreeStateByProject((prev) => {
+      const key = normalizeProjectKey(root);
+      const existing = prev[key];
+      if (!existing) return prev;
+      const nextWorktrees = existing.worktrees.filter((w) => comparableProjectPath(w.path) !== comparableProjectPath(path));
+      return {
+        ...prev,
+        [key]: {
+          ...existing,
+          forCwd: selectedCwd !== null && comparableProjectPath(selectedCwd) === comparableProjectPath(path) ? root : existing.forCwd,
+          worktrees: nextWorktrees,
+        },
+      };
+    });
+    if (selectedCwd !== null && comparableProjectPath(selectedCwd) === comparableProjectPath(path)) {
+      setSelectedCwd(root);
+    }
+    setWtRefreshKey((k) => k + 1);
+    loadSessions(false);
+    void loadProjects();
+    return "removed";
+  }, [selectedProject, worktreeStateByProject, selectedCwd, loadProjects, loadSessions]);
 
   // Clicking a session moves the effective cwd to that session's worktree.
   // Done on the click path (not via the selectedCwd prop sync) so it also
@@ -1069,19 +1047,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     ? worktreeStateByProject[normalizeProjectKey(selectedProject)]
     : undefined;
 
-  /** Inline branch label ("omp-web · main") from a project's OWN cached Git
-   *  state. Returns null when the project has no Git state or is not a git
-   *  repo, so a non-Git / not-yet-loaded project never shows another repo's
-   *  branch. */
-  const worktreeBranchForProject = useCallback((projectPath: string): string | null => {
-    const state = worktreeStateByProject[normalizeProjectKey(projectPath)];
-    if (!state || !state.isGit || !state.isTopLevel) return null;
-    const current = state.worktrees.find((w) => normalizeProjectKey(w.path) === normalizeProjectKey(selectedCwd ?? ""))
-      ?? state.worktrees.find((w) => w.isMain);
-    if (!current) return null;
-    return current.branch ?? displayCwd(current.path, homeDir);
-  }, [worktreeStateByProject, selectedCwd, homeDir]);
-
   const showWorktreeSwitcher = Boolean(
     activeGitState?.isGit
     && activeGitState.isTopLevel
@@ -1091,12 +1056,25 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     // server-resolved git root (Windows/NTFS), yet still be the same repo.
     && comparableProjectPath(selectedProject) === comparableProjectPath(activeGitState.projectRoot),
   );
-  const toggleWorktrees = useCallback(() => {
-    // Fold through closeWorktreeDropdown so closing never leaves the previous
-    // worktree's confirm/new-branch transient state behind.
-    if (wtDropdownOpen) closeWorktreeDropdown();
-    else setWtDropdownOpen(true);
-  }, [wtDropdownOpen, closeWorktreeDropdown]);
+  // The file panel's Worktrees tab renders the ACTIVE repo's own worktrees
+  // only; non-Git / subdirectory workspaces get null (no Git affordance).
+  const worktreeContext = useMemo<WorktreeContext | null>(() => {
+    if (!showWorktreeSwitcher || !activeGitState) return null;
+    const foldedCwd = comparableProjectPath(selectedCwd ?? "");
+    const current = activeGitState.worktrees.find((w) => comparableProjectPath(w.path) === foldedCwd)
+      ?? activeGitState.worktrees.find((w) => w.isMain);
+    return {
+      projectRoot: activeGitState.projectRoot,
+      worktrees: activeGitState.worktrees,
+      currentPath: current?.path ?? activeGitState.projectRoot,
+      select: setSelectedCwd,
+      create: handleCreateWorktree,
+      remove: handleRemoveWorktree,
+    };
+  }, [showWorktreeSwitcher, activeGitState, selectedCwd, handleCreateWorktree, handleRemoveWorktree]);
+  useEffect(() => {
+    onWorktreeContextChange?.(worktreeContext);
+  }, [onWorktreeContextChange, worktreeContext]);
 
   // Stable callbacks for the session list so memoized children don't re-render
   // on every parent state change.
@@ -1112,37 +1090,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     if (selected) setLastOpenSession(workspaceKeyOf(selected), selected.id);
   }, [allSessions, selectedSessionId]);
 
-  // row. Non-Git projects intentionally render no Git affordance at all. The
-  // switcher shows the ACTIVE repo's own worktrees/branches only.
-  const activeProjectSwitcher = showWorktreeSwitcher && activeGitState ? (
-    <ProjectWorktreeSwitcher
-      worktreeState={activeGitState}
-      selectedCwd={selectedCwd}
-      homeDir={homeDir}
-      wtDropdownOpen={wtDropdownOpen}
-      wtNewOpen={wtNewOpen}
-      setWtNewOpen={setWtNewOpen}
-      wtNewBranch={wtNewBranch}
-      setWtNewBranch={setWtNewBranch}
-      wtError={wtError}
-      setWtError={setWtError}
-      wtBusy={wtBusy}
-      wtConfirmRemove={wtConfirmRemove}
-      setWtConfirmRemove={setWtConfirmRemove}
-      onSelectWorktree={(path) => {
-        setSelectedCwd(path);
-        closeWorktreeDropdown();
-      }}
-      onCreateWorktree={handleCreateWorktree}
-      onRemoveWorktree={(path, force) => void handleRemoveWorktree(path, force)}
-      anchorRef={wtToggleRef}
-      newInputRef={wtNewInputRef}
-      onClose={closeWorktreeDropdown}
-    />
-  ) : null;
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+    <div className="sidebar-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
       {addProjectOpen && (
         <DirectoryPicker
           busy={addProjectBusy}
@@ -1177,8 +1126,43 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <OmpWebTitle />
+          <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                title={t("appShell.hideSidebar")}
+                aria-label={t("appShell.hideSidebar")}
+                className="shell-toolbar-btn ui-focus-ring"
+              >
+                <X size={16} strokeWidth={1.8} aria-hidden="true" />
+              </button>
+            )}
+            <OmpWebTitle />
+          </div>
           <div style={{ display: "flex", gap: 2 }}>
+            {navigation && (
+              <span className="sidebar-nav-buttons">
+                <Tooltip content={`${t("sessionSidebar.navigateBack")} (${navigation.backShortcut})`} side="bottom">
+                  <SidebarIconButton
+                    label={t("sessionSidebar.navigateBack")}
+                    onClick={navigation.onBack}
+                    disabled={!navigation.canBack}
+                  >
+                    <ArrowLeft size={15} strokeWidth={1.9} aria-hidden="true" />
+                  </SidebarIconButton>
+                </Tooltip>
+                <Tooltip content={`${t("sessionSidebar.navigateForward")} (${navigation.forwardShortcut})`} side="bottom">
+                  <SidebarIconButton
+                    label={t("sessionSidebar.navigateForward")}
+                    onClick={navigation.onForward}
+                    disabled={!navigation.canForward}
+                  >
+                    <ArrowRight size={15} strokeWidth={1.9} aria-hidden="true" />
+                  </SidebarIconButton>
+                </Tooltip>
+              </span>
+            )}
             {onOpenArchive && (
               <Tooltip content={t("sessionSidebar.archiveBrowserTitle")} side="bottom">
                 <SidebarIconButton
@@ -1242,7 +1226,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             gap: 7,
             background: "var(--bg-hover)",
             border: "1px solid var(--border)",
-            borderRadius: 9,
+            borderRadius: "var(--radius-control)",
             color: selectedCwd ? "var(--text)" : "var(--text-dim)",
             cursor: selectedCwd ? "pointer" : "not-allowed",
             fontSize: 12.5,
@@ -1315,6 +1299,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       {searchOpen && (
         <div style={{ padding: "0 10px 6px", flexShrink: 0 }}>
           <input
+            className="sidebar-session-search"
             ref={searchInputRef}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -1355,15 +1340,24 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           }}
         >
           {loading && (
-            <div style={{ padding: "10px 4px", color: "var(--text-muted)", fontSize: 12 }}>
-              {t("sessionSidebar.loading")}
+            <div role="status" aria-live="polite" aria-label={t("sessionSidebar.loading")} style={{ display: "grid", gap: 10, padding: "10px 4px" }}>
+              <div aria-hidden="true" className="skeleton" style={{ width: "78%", height: 18 }} />
+              <div aria-hidden="true" className="skeleton" style={{ width: "92%", height: 30 }} />
+              <div aria-hidden="true" className="skeleton" style={{ width: "86%", height: 30 }} />
+              <div aria-hidden="true" className="skeleton" style={{ width: "68%", height: 30 }} />
             </div>
           )}
           {projectsError && (
-            <div style={{ padding: "10px 4px", color: "var(--accent)", fontSize: 12 }}>{projectsError}</div>
+            <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 4px", color: "var(--status-error)", fontSize: 12 }}>
+              <span>{projectsError}</span>
+              <button className="load-retry-button" type="button" onClick={() => { loadSessions(false); void loadProjects(); }} style={{ minHeight: 32, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>{t("sessionSidebar.refresh")}</button>
+            </div>
           )}
           {error && (
-            <div style={{ padding: "10px 4px", color: "var(--accent)", fontSize: 12 }}>{error}</div>
+            <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 4px", color: "var(--status-error)", fontSize: 12 }}>
+              <span>{error}</span>
+              <button className="load-retry-button" type="button" onClick={() => { loadSessions(false); void loadProjects(); }} style={{ minHeight: 32, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>{t("sessionSidebar.refresh")}</button>
+            </div>
           )}
           {!loading && !projectsError && !error && sortedProjects.length === 0 && (
             <div style={{ padding: "10px 4px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
@@ -1384,11 +1378,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             // the project folder with different casing (Windows/NTFS) lands in
             // this row — the row must light up for it too.
             const isActive = selectedProject !== null && comparableProjectPath(selectedProject) === comparableProjectPath(project.path);
-            // Each project's own branch comes from its own cached Git state —
-            // a project never inherits another repo's branch. Only the active
-            // repo's row owns the single switcher anchor so the dropdown opens
-            // against the correct row.
-            const projectBranch = worktreeBranchForProject(project.path);
             return (
               <ProjectRow
                 key={project.path}
@@ -1401,6 +1390,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 selectedSessionId={selectedSessionId}
                 runningSessionIds={runningSessionIds}
                 unreadSessionIds={unreadSessionIds}
+                exitedSessions={exitedSessions}
                 relativeTimeNow={relativeTimeNow}
                 onActivate={activateProject}
                 onToggleExpand={toggleProjectExpanded}
@@ -1415,12 +1405,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 onSelectSession={handleSelectSessionFromList}
                 onRenamed={loadSessions}
                 onSessionDeleted={handleSessionDeleted}
-                activeWorktreeSwitcher={isActive ? activeProjectSwitcher : null}
-                worktreeBranch={projectBranch}
-                worktreeToggleRef={isActive && projectBranch ? wtToggleRef : undefined}
-                worktreeOpen={isActive ? wtDropdownOpen : false}
-                onToggleWorktrees={isActive ? toggleWorktrees : undefined}
-                homeDir={homeDir}
               />
             );
           })}
