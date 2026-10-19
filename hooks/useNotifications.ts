@@ -1,13 +1,15 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { toast } from "@/components/ui/toast";
 import { translate } from "@/lib/i18n";
+import { openEventStream } from "@/lib/event-stream";
 import { DEFAULT_NOTIFICATION_PREFS, renderNotification, type NotificationEvent, type RenderedNotification } from "@/lib/notification-events";
+import { notificationHistory } from "@/lib/notification-history";
+import { isRecord } from "@/lib/type-guards";
 import {
   ensurePushSubscription,
   getNotificationDeviceId,
   getNotificationPrefs,
   hasStoredNotificationPrefs,
-  NOTIFICATION_MESSAGE_EVENT,
   notificationClientId,
   OPEN_SESSION_EVENT,
   showSystemNotification,
@@ -99,18 +101,33 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     })().catch(() => {});
   }, []);
 
+  // The persisted Notifications list: loaded now and whenever the tab comes back, which brings read marks and removals from other devices.
+  useEffect(() => {
+    void notificationHistory.load();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void notificationHistory.load();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
   // Delivery to this tab and notification clicks.
   useEffect(() => {
-    // The whole card opens the session (click, tap, or Enter on the focused card); no separate Open link.
     const showToast = (rendered: RenderedNotification, type: NotificationEvent["type"]) => {
-      const target = rendered.sessionId;
       const show = type === "error" ? toast.error : toast.info;
-      show(rendered.title, rendered.body, { id: rendered.tag, onClick: target ? () => openRef.current(target) : undefined });
+      const target = rendered.sessionId;
+      // The whole card opens the session (click, tap, or Enter on the focused card); following it is reading it.
+      show(rendered.title, rendered.body, {
+        id: rendered.tag,
+        onClick: target ? () => {
+          notificationHistory.markRead(rendered.tag);
+          openRef.current(target);
+        } : undefined,
+      });
     };
-    const onMessage = (raw: Event) => {
-      if (!(raw instanceof CustomEvent)) return;
-      // Sent by SessionSidebar from our own SSE stream.
-      const { kind, event }: { kind: "toast" | "os"; event: NotificationEvent } = raw.detail;
+    const deliver = (kind: "toast" | "os", event: NotificationEvent) => {
+      // The server has already recorded it.
+      notificationHistory.add(event);
       const rendered = renderNotification(event, translate);
       if (kind === "toast") {
         showToast(rendered, event.type);
@@ -126,15 +143,32 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     };
     const onWorkerMessage = (message: MessageEvent) => {
       const data: unknown = message.data;
-      if (data && typeof data === "object" && "type" in data && data.type === "omp-open-session" && "sessionId" in data && typeof data.sessionId === "string") {
+      if (!isRecord(data)) return;
+      if (data.type === "omp-open-session" && typeof data.sessionId === "string") {
         openRef.current(data.sessionId);
+        return;
+      }
+      // A push the service worker showed while this tab was open: the server recorded it; fetch the list.
+      if (data.type === "omp-notification-shown") void notificationHistory.load();
+    };
+    // This tab's own channel: the server delivers here while it is open, on any
+    // view (the chat, Settings, ...), and counts the tab as reachable.
+    const stream = openEventStream({ kind: "notifications", clientId: notificationClientId });
+    stream.onmessage = ({ data }) => {
+      try {
+        const frame: unknown = JSON.parse(data);
+        if (!isRecord(frame) || frame.type !== "notification" || (frame.kind !== "toast" && frame.kind !== "os") || !isRecord(frame.event)) return;
+        // Built by our own server's notification hub from a NotificationEvent.
+        const event = frame.event as unknown as NotificationEvent;
+        deliver(frame.kind, event);
+      } catch {
+        // ignore malformed frames
       }
     };
-    window.addEventListener(NOTIFICATION_MESSAGE_EVENT, onMessage);
     window.addEventListener(OPEN_SESSION_EVENT, onOpen);
     navigator.serviceWorker?.addEventListener("message", onWorkerMessage);
     return () => {
-      window.removeEventListener(NOTIFICATION_MESSAGE_EVENT, onMessage);
+      stream.close();
       window.removeEventListener(OPEN_SESSION_EVENT, onOpen);
       navigator.serviceWorker?.removeEventListener("message", onWorkerMessage);
     };

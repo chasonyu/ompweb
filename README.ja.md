@@ -27,7 +27,7 @@
 ## 必要条件
 
 - [omp](https://github.com/can1357/oh-my-pi) がインストールされ、`PATH` に含まれていること（または `OMP_WEB_OMP_BIN` で指定）
-- Node.js `>= 22.19.0`
+- Node.js `>= 24`
 
 キュー内のフォローアップに対する **Steer** 操作には、`promote_queued_message` RPC コマンドをサポートする omp ランタイムが必要です（omp 18.1.16 では未対応）。古いランタイムではエラーを表示し、メッセージはフォローアップとしてキューに残ります。ompweb が重複したステアリングメッセージを送信することはありません。
 
@@ -63,11 +63,16 @@ ompweb --no-open                           # ブラウザ自動起動を無効�
 
 ### パスワード保護
 
-omp-web は**平文パスワードを一切読み取りません**。`OMP_WEB_PASSWORD` や
-`--password` を指定すると起動を拒否します。すべての `omp` セッションは
+omp-web は**平文パスワードをサーバーに渡しません**。すべての `omp` セッションは
 サーバーの環境変数を引き継ぐため、エージェントが `env` を実行するだけで
 パスワードがセッションファイルに記録され、モデルプロバイダーにも送信されて
-しまうからです。
+しまうからです。`--password` を指定すると起動を拒否します。`OMP_WEB_PASSWORD`
+は当面使えます。`ompweb` が起動時にハッシュ化してサーバーの環境変数から除き、
+`OMP_WEB_PASSWORD_HASH` に設定すべきハッシュを警告としてログに出力します。
+早めに切り替えてください。エージェントは `ompweb` ランチャープロセスから平文を
+読み取れるうえ、起動のたびに新しいハッシュが作られるため、再起動ごとにすべての
+ブラウザがサインアウトされます。両方の変数を設定すると起動を拒否するので、
+`OMP_WEB_PASSWORD` を削除してください。
 
 代わりにハッシュを生成して渡します。
 
@@ -115,14 +120,15 @@ Linux トレイ、Windows サービス）はインストール時に `OMP_WEB_PA
 | `PORT` | サーバーポート | `30177` |
 | `OMP_WEB_HOSTNAME` | バインドホスト | `127.0.0.1` |
 | `OMP_WEB_PASSWORD_HASH` | Web ログイン用パスワードの scrypt ハッシュ（`ompweb hash-password` で生成）。非ループバックバインドには必須 | _なし（認証無効）_ |
+| `OMP_WEB_TRUSTED_HEADER_SHA256` | 信頼できるリバースプロキシが `X-Omp-Web-Auth` ヘッダーで送るシークレットの SHA-256 ダイジェスト（16 進）。ヘッダーのハッシュが一致したリクエストはパスワードなしで通ります。omp-web はシークレット自体を保持しません。生成方法と nginx の設定例は英語版 README の「Skipping the password on trusted networks」を参照してください | _なし（無効）_ |
 | `OMP_WEB_NO_OPEN` | `1` でブラウザ自動起動を無効化 | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | `1` で更新チェックとアプリ内更新を無効化（変更後は再起動） | `0` |
 | `OMP_WEB_NAME` | ブラウザのタブとインストールしたアプリに表示する名前。`url`・`host`・`domain`（大文字小文字を区別しない）を指定すると、ブラウザが接続したホスト名（ポートなし）を使用します（localhost と IP アドレスは `omp web` のまま）。それ以外の値はそのまま使用します（変更後は再起動） | `omp web` |
 | `OMP_WEB_OMP_BIN` | `omp` の絶対パス（PATH 未登録時） | _自動検出_ |
 | `PI_CODING_AGENT_DIR` | カスタム omp エージェントディレクトリ | `~/.omp/agent` |
-| `OMP_WEB_STT_ENDPOINT` | OpenAI 互換の音声認識エンドポイント URL | _なし（無効）_ |
+| `OMP_WEB_STT_ENDPOINT` | OpenAI 互換の音声認識エンドポイント URL。未設定の場合は `OMP_WEB_STT_MODEL` を omp 自身の認証情報で使って文字起こしします | _なし_ |
 | `OMP_WEB_STT_KEY` | STT エンドポイント用の API キー | _なし_ |
-| `OMP_WEB_STT_MODEL` | STT エンドポイント用のモデル名 | _なし_ |
+| `OMP_WEB_STT_MODEL` | STT エンドポイント用のモデル名。エンドポイント未設定時は、omp のログインで実行する omp の音声認識モデル（例: `openai-codex/codex-transcribe`。ChatGPT サブスクリプション、このモデルを含む omp バージョンが必要） | _なし（エンドポイント未設定時は無効）_ |
 
 **`OMP_WEB_NAME` とインストールしたアプリ。** インストールしたアプリ（PWA）の名前は、通常インストール元のページの名前になります。あとで `OMP_WEB_NAME` を変更した場合や、`OMP_WEB_NAME` が `url`・`host`・`domain` のときに別のアドレスで omp-web にアクセスした場合、OS がインストール済みアプリの名前も変更することがあります。`OMP_WEB_NAME` は空のままにするか、どのドメイン名やアドレスでアクセスしてもこの omp-web サーバーを識別できる名前を設定することをおすすめします。
 

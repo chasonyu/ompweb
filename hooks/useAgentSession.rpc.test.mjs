@@ -9,55 +9,75 @@ import { createJiti } from "jiti";
 import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 
 // useAgentSession is the chat state machine. These tests drive it through a
-// controllable fake EventSource + fetch router mounted via React Testing Library:
-// connection, streaming, terminal events, late/duplicate frames,
-// reconnect, and unmount — not source-string checks.
+// controllable fake shared-worker event stream + fetch router mounted via React
+// Testing Library: connection, streaming, terminal events, late/duplicate
+// frames, reconnect, and unmount — not source-string checks.
 
 
 // ---------------------------------------------------------------------------
-// Fake EventSource + fetch router
+// Fake shared-worker event streams + fetch router
 // ---------------------------------------------------------------------------
-class FakeEventSource {
+/** One stream the hook opened through lib/event-stream.ts, as the worker sees it. */
+class FakeStream {
   static CONNECTING = 0;
   static OPEN = 1;
   static CLOSED = 2;
-  constructor(url) {
-    this.url = String(url);
-    this.readyState = FakeEventSource.CONNECTING;
-    this.onopen = null;
-    this.onmessage = null;
-    this.onerror = null;
+  constructor(port, id, channel) {
+    this.port = port;
+    this.id = id;
+    this.channel = channel;
+    this.readyState = FakeStream.CONNECTING;
     this.closedByCaller = false;
     world.esInstances.push(this);
   }
+  deliver(message) {
+    this.port.onmessage?.({ data: { id: this.id, ...message } });
+  }
   open() {
     if (this.closedByCaller) return;
-    this.readyState = FakeEventSource.OPEN;
-    this.onopen?.({});
-    const sid = this.url.match(/\/api\/agent\/([^/]+)/)?.[1];
-    this.onmessage?.({ data: JSON.stringify({ type: "connected", web: world.streams.get(sid) ?? { streamId: `stream-${sid}`, sequence: 0 } }) });
+    this.readyState = FakeStream.OPEN;
+    this.deliver({ type: "open" });
+    const sid = this.channel.sessionId;
+    this.deliver({ type: "message", data: JSON.stringify({ type: "connected", web: world.streams.get(sid) ?? { streamId: `stream-${sid}`, sequence: 0 } }) });
   }
   emit(event, { persist = true } = {}) {
     if (this.closedByCaller) return;
-    const sid = this.url.match(/\/api\/agent\/([^/]+)/)?.[1];
+    const sid = this.channel.sessionId;
     const previous = world.streams.get(sid) ?? { streamId: `stream-${sid}`, sequence: 0 };
     const web = event.web ?? { ...previous, sequence: previous.sequence + 1 };
     world.streams.set(sid, web);
     if (event.type === "agent_start") this.running = true;
-    this.onmessage?.({ data: JSON.stringify({ ...event, web }) });
+    this.deliver({ type: "message", data: JSON.stringify({ ...event, web }) });
     // Native message_end precedes appendMessage; make that persistence explicit.
     if (event.type === "message_end" && persist && this.running) appendEntry(sid, event.message);
     if (event.type === "agent_end" && event.isTerminal !== false) this.running = false;
   }
   failFatal() {
-    // Browser-facing fatal error (404/500): readyState CLOSED + onerror.
+    // Fatal subscription error (409 unmanaged wrapper): CLOSED + onerror.
     if (this.closedByCaller) return;
-    this.readyState = FakeEventSource.CLOSED;
-    this.onerror?.({});
+    this.readyState = FakeStream.CLOSED;
+    this.deliver({ type: "error", readyState: FakeStream.CLOSED });
   }
-  close() {
-    this.closedByCaller = true;
-    this.readyState = FakeEventSource.CLOSED;
+}
+
+/** Speaks the tab<->worker protocol of public/event-stream-worker.js. */
+class FakeSharedWorker {
+  constructor() {
+    const streams = new Map();
+    this.port = {
+      onmessage: null,
+      start() {},
+      postMessage: (message) => {
+        if (message.op === "open") {
+          streams.set(message.id, new FakeStream(this.port, message.id, message.channel));
+        } else if (message.op === "close") {
+          const stream = streams.get(message.id);
+          if (!stream) return;
+          stream.closedByCaller = true;
+          stream.readyState = FakeStream.CLOSED;
+        }
+      },
+    };
   }
 }
 
@@ -179,7 +199,7 @@ async function fetchStub(url, init = {}) {
 // boundaries need doubles. Hidden tabs use the coalescer's 50ms timer.
 let visibilityState = "hidden";
 const overrides = [
-  [globalThis, "EventSource", { value: FakeEventSource }],
+  [globalThis, "SharedWorker", { value: FakeSharedWorker }],
   [globalThis, "fetch", { value: fetchStub }],
   [document, "hidden", { get: () => visibilityState === "hidden" }],
   [document, "visibilityState", { get: () => visibilityState }],
@@ -332,8 +352,8 @@ async function startRun(sid, message, strictMode = false, options = {}) {
     await sleep(30); // let the pre-connect get_state POST settle
   });
   const es = lastEs();
-  assert.ok(es, "an EventSource must have been created");
-  assert.match(es.url, /\/api\/agent\/.+\/events$/);
+  assert.ok(es, "an event stream must have been opened");
+  assert.deepEqual(es.channel, { kind: "session", sessionId: sid });
   await act(async () => {
     es.open(); // connect settles → prompt POST fires
     await sendPromise;
@@ -991,7 +1011,7 @@ test("ISSUE #167 sending a TUI-only command warns once and still delivers the te
   await settle();
   es = await send("/guided-goal again");
   assert.equal(w.latest.notices.length, 1, "the same name is not repeated");
-  es.close();
+  w.unmount();
 });
 
 test("full run over fake SSE: optimistic bubble, coalesced streaming, terminal reload", async () => {
@@ -1051,6 +1071,41 @@ test("full run over fake SSE: optimistic bubble, coalesced streaming, terminal r
     callsTo("GET", "/api/sessions/s1").length >= 2,
     "agent_end must reload the transcript from the session file",
   );
+});
+
+test("a finished reply stays on screen until its saved copy replaces it", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "loaded question")]);
+  const { w, es } = await startRun("s1", "hello agent");
+  world.agents.set("s1", { running: true, state: { isStreaming: true } });
+  const reply = { ...assistantMsg("a1", "hello world"), timestamp: 42 };
+  await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+  await act(async () => { es.emit({ type: "message_update", message: reply }); await Promise.resolve(); });
+  await settle(90);
+  const shown = () => w.latest.streamState.streamingMessage?.content?.[0]?.text === "hello world";
+  const saved = () => w.latest.messages.filter((m) => m.timestamp === 42).length;
+  // The first read after message_end races omp's write: the reply is not
+  // saved yet, and the server's live state has no message any more.
+  saveSession("s1", [userMsg("u0", "loaded question"), userMsg("u1", "hello agent")]);
+  const releaseSync = holdNextSync("s1", syncSnapshot("s1", liveSnapshot("s1", 99, null)));
+  await act(async () => { es.emit({ type: "message_end", message: reply }); await Promise.resolve(); });
+  // Dropping the reply before its saved copy arrives empties that space: the
+  // chat jumps up to where the reply started, then back down.
+  assert.ok(shown(), "the reply stays while the save is read");
+  await act(async () => { releaseSync(); });
+  await settle();
+  assert.ok(shown(), "a read without the saved reply keeps it on screen");
+  assert.equal(saved(), 0);
+  world.agents.set("s1", { running: false, state: { isStreaming: false } });
+  await act(async () => { es.emit({ type: "agent_end", isTerminal: true }); });
+  await settle();
+  assert.ok(shown(), "the end of the run keeps it too");
+  // The save lands; the next read hands the reply over to its saved copy.
+  saveSession("s1", [userMsg("u0", "loaded question"), userMsg("u1", "hello agent"), reply]);
+  await act(async () => { es.emit({ type: "message_end", message: userMsg("u2", "unrelated") }); });
+  await settle();
+  assert.equal(saved(), 1, "the saved copy is shown once");
+  assert.equal(w.latest.streamState.streamingMessage, null, "the held reply gives way to its saved copy");
 });
 
 test("provider error on the assistant message is shown instead of ending silently", async () => {
@@ -1646,7 +1701,7 @@ test("fatal SSE error mid-run reconnects after 1s and the new stream delivers ev
   const instanceCount = world.esInstances.length;
 
   es1.failFatal();
-  assert.equal(es1.readyState, FakeEventSource.CLOSED);
+  assert.equal(es1.readyState, FakeStream.CLOSED);
   await settle(1500); // > reconnect backoff
   assert.equal(world.esInstances.length, instanceCount + 1, "a replacement stream must be created");
 
@@ -1873,11 +1928,11 @@ test("a btw follow-up asks in its topic; a refused ask keeps the composer text a
   assert.deepEqual(toastCalls, []);
 });
 
-test("the notify host tool lands in the notification center even without OS notification support", async () => {
+test("the notify host tool stays out of the Notifications tab, which lists only pushable notification types", async () => {
   toastCalls.length = 0;
   const result = await runHostTool("notify", { title: "Build done", message: "All green" }, { openUrl: () => "" });
   assert.deepEqual(result, { text: "Notification shown", isError: false });
-  assert.deepEqual(toastCalls, [["record", "info", "Build done", "All green"]]);
+  assert.deepEqual(toastCalls, []);
 });
 
 test("SSE open merges the btw history; a no-op cancel re-reads it and settles a record omp lost", async () => {
@@ -3222,10 +3277,10 @@ test("unmount before replacement open cannot restore stale wrapper registrations
   await act(async () => { publishSessionsChanged(["s1"]); });
   await settle();
   const replacement = lastEs();
-  const lateOpen = replacement.onopen;
   await act(async () => { w.unmount(); });
   const before = world.calls.length;
-  await act(async () => { lateOpen({}); });
+  // The worker's open for the replacement lands after unmount closed it.
+  await act(async () => { replacement.deliver({ type: "open" }); });
   assert.equal(world.calls.slice(before).some((c) => c.method === "POST"), false);
 });
 
@@ -3684,7 +3739,7 @@ test("a fresh chat hydrates and follows skill diagnostics after slash discovery 
 
   await act(async () => { await w.latest.loadSlashCommands(); });
   const es = lastEs();
-  assert.match(es?.url ?? "", /\/api\/agent\/fresh-skills\/events$/, "the created runtime must be observed before its first prompt");
+  assert.deepEqual(es?.channel, { kind: "session", sessionId: "fresh-skills" }, "the created runtime must be observed before its first prompt");
   await act(async () => {
     es.open();
     await sleep(30);

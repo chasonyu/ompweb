@@ -12,7 +12,8 @@ import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
 import { SessionSidebar } from "./SessionSidebar";
 import type { WorktreeContext } from "./SessionSidebar-helpers";
 import { ToastProvider } from "./ui/toast";
-import { toast, toastHistory, useUnreadToastCount } from "./ui/toast";
+import { toast } from "./ui/toast";
+import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
 import { ConfirmDialog } from "./ui/field";
 import { ChatWindow } from "./ChatWindow";
 import { type Tab } from "./TabBar";
@@ -69,6 +70,7 @@ import {
 import type { CrossSessionHostToolCall, ManagedProject, SessionInfo, SessionTreeNode } from "@/lib/types";
 import { runHostTool } from "@/hooks/useAgentSession-stream";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { openEventStream } from "@/lib/event-stream";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
 import type { SettingsTab } from "./SettingsTabs";
@@ -93,6 +95,7 @@ const RightPanel = dynamic(() => import("./RightPanel").then((m) => m.RightPanel
 });
 
 const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
+const HIDE_TOOL_ACTIVITY_STORAGE_KEY = "omp-web:hide-tool-activity";
 // Off by default, so the transcript keeps collapsing reasoning until asked.
 const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
@@ -137,6 +140,7 @@ export function AppShell({ appName }: { appName: string }) {
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
+  const [hideToolActivity, setHideToolActivity] = useState(true);
   // "Expand thinking blocks by default" — like the tool-call preference, a
   // UI-only behavior, so it lives in localStorage rather than omp's config.
   const [expandThinkingByDefault, setExpandThinkingByDefault] = useState(false);
@@ -170,6 +174,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSidebarWidth(loadSidebarWidth());
     try {
       setToolCallsDefaultCollapsed(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) !== "false");
+      setHideToolActivity(window.localStorage.getItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY) !== "false");
       setExpandThinkingByDefault(window.localStorage.getItem(EXPAND_THINKING_STORAGE_KEY) === "true");
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
       setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
@@ -182,6 +187,14 @@ export function AppShell({ appName }: { appName: string }) {
     setToolCallsDefaultCollapsed(collapsed);
     try {
       window.localStorage.setItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY, String(collapsed));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleHideToolActivityChange = useCallback((hide: boolean) => {
+    setHideToolActivity(hide);
+    try {
+      window.localStorage.setItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY, String(hide));
     } catch {
       // The preference still applies for this page load.
     }
@@ -998,13 +1011,13 @@ export function AppShell({ appName }: { appName: string }) {
   }, [isCompactOverlay]);
   const [rightPanelHasOpened, setRightPanelHasOpened] = useState(false);
   const [rightView, setRightView] = useState<RightPanelView>("explorer");
-  const unreadNotifications = useUnreadToastCount();
+  const unreadNotifications = useUnreadNotificationCount();
   // Unread entries stay highlighted while the Notifications tab is shown and
   // become read once the user leaves it (switches tab or closes the panel).
   const viewingNotifications = rightPanelOpen && rightView === "notifications" && !settingsTab;
   const wasViewingNotificationsRef = useRef(false);
   useEffect(() => {
-    if (wasViewingNotificationsRef.current && !viewingNotifications) toastHistory.markAllRead();
+    if (wasViewingNotificationsRef.current && !viewingNotifications) notificationHistory.markAllRead();
     wasViewingNotificationsRef.current = viewingNotifications;
   }, [viewingNotifications]);
   const opensNotifications = unreadNotifications > 0 && !viewingNotifications;
@@ -1590,7 +1603,7 @@ export function AppShell({ appName }: { appName: string }) {
   useEffect(() => {
     // Mounted with the shell (not the sidebar) so it keeps listening on the
     // full-page Settings view too.
-    const source = new EventSource("/api/agent/host-tools/events");
+    const source = openEventStream({ kind: "host-tools" });
     source.onmessage = (e) => {
       try {
         const call = JSON.parse(e.data) as CrossSessionHostToolCall & { type?: string };
@@ -1997,6 +2010,8 @@ export function AppShell({ appName }: { appName: string }) {
             activeTab={settingsTab}
             toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
             onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange}
+            hideToolActivity={hideToolActivity}
+            onHideToolActivityChange={handleHideToolActivityChange}
             expandThinkingByDefault={expandThinkingByDefault}
             onExpandThinkingByDefaultChange={handleExpandThinkingByDefaultChange}
             onHideThinkingBlockChange={setHideThinkingBlock}
@@ -2496,6 +2511,7 @@ export function AppShell({ appName }: { appName: string }) {
               onGenerationSpeedChange={handleGenerationSpeedChange}
               onOpenProviders={() => setSettingsTab("providers")}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              hideToolActivity={hideToolActivity}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
             />

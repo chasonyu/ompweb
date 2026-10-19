@@ -906,7 +906,7 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       if (entry.type === "custom_message" && getEntryUserPromptText(entry) !== undefined) parsedMessageCount++;
     }
 
-    if (!header.title && !firstMessage && size > SESSION_LIST_PREFIX_BYTES && size <= MAX_SESSION_LOAD_BYTES) {
+    if (!firstMessage && size > SESSION_LIST_PREFIX_BYTES && size <= MAX_SESSION_LOAD_BYTES) {
       // Oversized files must remain discoverable so detail routes can return 413.
       // RPC sessions may persist a large initialization notice before the user
       // message. Prefer that user's text over any assistant/developer fallback.
@@ -920,7 +920,7 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
           }
           const text = getEntryUserPromptText(entry);
           if (!text?.trim()) return;
-          firstMessage = text;
+          firstMessage = text.slice(0, SESSION_LIST_PREFIX_BYTES);
           return false;
         });
       } catch {

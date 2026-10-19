@@ -28,6 +28,15 @@ export function getUserPromptText(message: unknown): string | undefined {
   if (typeof details.prompt === "string" && details.prompt.trim()) return details.prompt;
   const name = typeof details.name === "string" ? details.name.trim() : "";
   const args = typeof details.args === "string" ? details.args.trim() : "";
+  if (!name && !args) {
+    // Older OMP skill entries stored the original input only in the body.
+    const content = textContent(message.content);
+    const parts = content.split(/\nUser:\s*/);
+    const prompt = parts.length > 1 ? parts[parts.length - 1]?.trim() : undefined;
+    if (prompt) return prompt;
+    const skillMatch = /User invoked the "([^"]+)" skill/.exec(content);
+    if (skillMatch?.[1]) return `Skill: ${skillMatch[1]}`;
+  }
   return `${name ? `/skill:${name}` : "/skill"}${args ? ` ${args}` : ""}`;
 }
 
