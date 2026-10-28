@@ -27,7 +27,7 @@ export type ThemeDefinition = {
 };
 
 export const LIGHT_THEMES: ReadonlyArray<ThemeDefinition> = [
-  { id: "codex-light", name: "Codex Light", mode: "light", bg: "#FFFFFF", accent: "#1A1C1F" },
+  { id: "codex-light", name: "Codex Light", mode: "light", bg: "#FFFFFF", accent: "#3A83F7" },
   { id: "light", name: "Light (default)", mode: "light", bg: "#FAF9F6", accent: "#B03E22" },
   { id: "one-light", name: "One Light", mode: "light", bg: "#FAFAFA", accent: "#2F65D9" },
   { id: "catppuccin-latte", name: "Catppuccin Latte", mode: "light", bg: "#EFF1F5", accent: "#1E66F5" },

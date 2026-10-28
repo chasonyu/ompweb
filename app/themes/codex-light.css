@@ -5,16 +5,17 @@ html[data-theme="codex-light"], html.theme-codex-light {
   --bg: #FFFFFF;
   --bg-panel: #F9F9F9;
   --bg-hover: color-mix(in oklab, #1a1c1f 5%, transparent);
-  --bg-selected: color-mix(in oklab, #1a1c1f 8%, transparent);
+  --bg-selected: rgb(58 131 247 / 10%);
   --border: color-mix(in oklab, #1a1c1f 8%, transparent);
   --border-strong: color-mix(in oklab, #1a1c1f 12%, transparent);
   --text: #1A1C1F;
   --text-muted: color-mix(in srgb, #1a1c1f 65%, transparent);
   --text-dim: color-mix(in oklab, #1a1c1f 50%, transparent);
-  --accent: #1A1C1F;
-  --accent-strong: #1A1C1F;
-  --accent-hover: #414141;
-  --user-bg: color-mix(in oklab, #1a1c1f 5%, transparent);
+  --accent: #2C67C5;
+  /* Shared small white-label buttons need more contrast than Codex icon buttons. */
+  --accent-strong: #2C67C5;
+  --accent-hover: #1F4E94;
+  --user-bg: #E8F3FE;
   --tool-bg: #F9F9F9;
   --bg-subtle: color-mix(in oklab, #1a1c1f 2%, transparent);
   --status-error: #E02E2A;
@@ -24,7 +25,7 @@ html[data-theme="codex-light"], html.theme-codex-light {
   --status-renamed: #0169CC;
   --on-accent: #FFFFFF;
   --overlay-backdrop: rgb(0 0 0 / 24%);
-  --focus-ring: 0 0 0 2px rgb(51 156 255 / 40%);
+  --focus-ring: 0 0 0 2px rgb(58 131 247 / 40%);
   --shadow-card: 0 1px 2px rgb(0 0 0 / 5%);
   --shadow-pop: 0 4px 16px rgb(0 0 0 / 10%);
   --shadow-modal: 0 12px 40px rgb(0 0 0 / 16%);
@@ -39,4 +40,9 @@ html.theme-codex-light body {
   font-synthesis-weight: none;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+html.theme-codex-light ::selection {
+  background: #539AF859;
+  color: var(--text);
 }
