@@ -644,6 +644,8 @@ export interface OmpSessionInfo {
   size: number;
   firstMessage: string;
   status?: SessionStatus;
+  /** Timestamp of the last message entry in the tail window (when scanned with status). */
+  lastMessageAt?: Date;
 }
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
@@ -726,6 +728,27 @@ function extractFirstDisplayMessageFromPrefix(content: string): string | undefin
   return fallback;
 }
 
+// Injected context can push the first user turn past the listing prefix.
+function scanFirstUserMessage(filePath: string): string {
+  let text = "";
+  try {
+    forEachFileLineSync(filePath, (line) => {
+      if (!line.includes('"user"')) return;
+      try {
+        const prompt = getEntryUserPromptText(JSON.parse(line));
+        if (!prompt?.trim()) return;
+        text = prompt;
+        return false;
+      } catch {
+        // Torn or hand-edited line: skip it, as parseJsonlLenient does.
+      }
+    });
+  } catch {
+    // Keep readable metadata when a long line cannot be decoded.
+  }
+  return text;
+}
+
 
 interface TailMessage {
   role?: string;
@@ -759,26 +782,27 @@ function statusFromTailMessage(message: TailMessage): SessionStatus {
   }
 }
 
-/** Derive the lifecycle status from the tail window's last message entry. */
-function deriveSessionStatus(suffix: string): SessionStatus {
-  if (!suffix) return "unknown";
+/** The tail window's last message entry: lifecycle status plus its timestamp. */
+function scanTailMessage(suffix: string): { status: SessionStatus; lastMessageAt?: Date } {
+  if (!suffix) return { status: "unknown" };
   const lines = suffix.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     // Every persisted entry starts with "{" — cheaply skips blank lines and
     // the leading partial fragment of the tail window.
     if (line.charCodeAt(0) !== 123) continue;
-    let entry: { type?: string; message?: TailMessage };
+    let entry: { type?: string; timestamp?: unknown; message?: TailMessage };
     try {
       entry = JSON.parse(line);
     } catch {
       continue;
     }
     if (entry.type === "message" && entry.message) {
-      return statusFromTailMessage(entry.message);
+      const at = typeof entry.timestamp === "string" ? new Date(entry.timestamp) : undefined;
+      return { status: statusFromTailMessage(entry.message), lastMessageAt: at && !Number.isNaN(at.getTime()) ? at : undefined };
     }
   }
-  return "unknown";
+  return { status: "unknown" };
 }
 
 interface SessionListHeader {
@@ -852,8 +876,13 @@ function parseSessionListHeader(
   return undefined;
 }
 
-function readTextSlices(filePath: string, prefixBytes: number, suffixBytes: number): [string, string, number, Date] {
-  const stat = statSync(filePath);
+function readTextSlices(
+  filePath: string,
+  prefixBytes: number,
+  suffixBytes: number,
+  knownStat?: { size: number; mtime: Date },
+): [string, string, number, Date] {
+  const stat = knownStat ?? statSync(filePath);
   const fd = openSync(filePath, "r");
   try {
     const prefixLength = Math.min(prefixBytes, stat.size);
@@ -879,12 +908,17 @@ function readTextSlices(filePath: string, prefixBytes: number, suffixBytes: numb
  * sessions whose prelude fills the prefix are scanned until user text is found.
  * messageCount is a lower bound, not the total number of messages in the file.
  */
-export function scanSessionInfo(filePath: string, withStatus = true): OmpSessionInfo | undefined {
+export function scanSessionInfo(
+  filePath: string,
+  withStatus = true,
+  knownStat?: { size: number; mtime: Date },
+): OmpSessionInfo | undefined {
   try {
     const [content, suffix, size, mtime] = readTextSlices(
       filePath,
       SESSION_LIST_PREFIX_BYTES,
       withStatus ? SESSION_LIST_SUFFIX_BYTES : 0,
+      knownStat,
     );
     const entries = parseJsonlLenient<Record<string, unknown>>(content);
     const header = parseSessionListHeader(content, entries);
@@ -900,35 +934,18 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       }
       if (entry.type === "message" && entry.message) {
         parsedMessageCount++;
-
       }
       if (!firstMessage) firstMessage = getEntryUserPromptText(entry) ?? "";
       if (entry.type === "custom_message" && getEntryUserPromptText(entry) !== undefined) parsedMessageCount++;
     }
 
+    // Cap list previews and skip full scans for files past the load ceiling.
     if (!firstMessage && size > SESSION_LIST_PREFIX_BYTES && size <= MAX_SESSION_LOAD_BYTES) {
-      // Oversized files must remain discoverable so detail routes can return 413.
-      // RPC sessions may persist a large initialization notice before the user
-      // message. Prefer that user's text over any assistant/developer fallback.
-      try {
-        forEachFileLineSync(filePath, (line) => {
-          let entry: unknown;
-          try {
-            entry = JSON.parse(line);
-          } catch {
-            return;
-          }
-          const text = getEntryUserPromptText(entry);
-          if (!text?.trim()) return;
-          firstMessage = text.slice(0, SESSION_LIST_PREFIX_BYTES);
-          return false;
-        });
-      } catch {
-        // The preview is optional; retain header metadata when a long line cannot be decoded.
-      }
+      firstMessage = scanFirstUserMessage(filePath).slice(0, SESSION_LIST_PREFIX_BYTES);
     }
     const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content), firstMessage ? 1 : 0);
     firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
+    const tail = withStatus ? scanTailMessage(suffix) : undefined;
     return {
       path: filePath,
       id: header.id,
@@ -940,7 +957,8 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       messageCount,
       size,
       firstMessage: firstMessage || "(no messages)",
-      status: withStatus ? deriveSessionStatus(suffix) : undefined,
+      status: tail?.status,
+      lastMessageAt: tail?.lastMessageAt,
     };
   } catch {
     return undefined;
@@ -998,7 +1016,7 @@ export function invalidateAllSessionScanCaches(): void {
 /** scanSessionInfo memoized on (path, size, mtimeMs). Callers must treat the
  * returned info as immutable — cache hits share one object. */
 function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
-  let stat: { size: number; mtimeMs: number };
+  let stat: { size: number; mtime: Date; mtimeMs: number };
   try {
     stat = statSync(filePath);
   } catch {
@@ -1013,7 +1031,7 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
     return cached.info;
   }
   if (cached) cache.delete(key);
-  const info = scanSessionInfo(filePath, true);
+  const info = scanSessionInfo(filePath, true, stat);
   // Failed scans are not negatively cached: a transient read error must not
   // hide a session until its next mtime bump.
   if (info) {

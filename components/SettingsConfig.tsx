@@ -1,5 +1,7 @@
 "use client";
 
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
@@ -17,6 +19,7 @@ import type { AppUpdateInfo } from "./AppUpdateDialog";
 import { useFontSize, type FontSizePreference } from "@/hooks/useFontSize";
 import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
 import { useTouchTargets, type TouchTargetsPreference } from "@/hooks/useTouchTargets";
+import { useRecentRunsLimit, type RecentRunsLimitPreset } from "@/hooks/useRecentRunsLimit";
 import { useSpeechSynthesis } from "@/hooks/useSpeechSynthesis";
 import { useNotificationPrefs } from "@/hooks/useNotifications";
 import { NOTIFICATION_TYPES, renderNotification, type NotificationType } from "@/lib/notification-events";
@@ -210,6 +213,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "model-breakdown", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.breakdown", descKey: "usageConfig.model", fallbackSection: "Usage", fallbackLabel: "Model Breakdown", fallbackDesc: "Historical token usage and cost per model, day, and project", scope: "UI" },
   // Windows Background Service & System Tray
   { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System & Updates", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
+  { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow agents to call list_sessions, new_session and send_to_session to reach other omp-web sessions, even with no browser tab open. Delivered messages are prefixed with the sending session's ID." },
   { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
   { id: "windows-service-shortcuts", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceInstallBtn", descKey: "settingsConfig.windowsServiceDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Install Service & Shortcuts", fallbackDesc: "Manage background service execution, system tray monitor, Windows logon autostart, and Desktop shortcuts.", scope: "UI" },
@@ -276,78 +280,6 @@ function SearchResultsList({ results, query, onSelect }: { results: SearchResult
   );
 }
 
-function ToggleSwitch({
-  checked,
-  onChange,
-  disabled,
-  id,
-  "aria-label": ariaLabel,
-  "aria-labelledby": ariaLabelledBy,
-  "aria-describedby": ariaDescribedBy,
-}: {
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-  disabled?: boolean;
-  id?: string;
-  "aria-label"?: string;
-  "aria-labelledby"?: string;
-  "aria-describedby"?: string;
-}) {
-  return (
-    <button
-      id={id}
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={ariaLabel}
-      aria-labelledby={ariaLabelledBy}
-      aria-describedby={ariaDescribedBy}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className="ui-focus-ring"
-      style={{
-        position: "relative",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: 44,
-        height: 44,
-        padding: 0,
-        border: "none",
-        background: "transparent",
-        cursor: disabled ? "not-allowed" : "pointer",
-        flexShrink: 0,
-      }}
-    >
-      <span
-        aria-hidden="true"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          width: 40,
-          height: 24,
-          padding: 2,
-          borderRadius: 12,
-          background: checked ? "var(--accent-strong)" : "var(--border)",
-          transition: "background var(--dur-fast)",
-        }}
-      >
-        <span
-          style={{
-            width: 20,
-            height: 20,
-            borderRadius: 10,
-            background: "#fff",
-            transform: checked ? "translateX(16px)" : "translateX(0px)",
-            transition: "transform var(--dur-fast)",
-            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-          }}
-        />
-      </span>
-    </button>
-  );
-}
-
 /** Server-side omp-web setting (lib/web-settings.ts), loaded on mount. */
 function AutoResumeSessionsSetting() {
   const { t } = useI18n();
@@ -377,6 +309,41 @@ function AutoResumeSessionsSetting() {
   };
   return (
     <NativeSetting searchId="auto-resume-sessions" label={t("settingsConfig.autoResumeSessions")} description={t("settingsConfig.autoResumeSessionsDesc")}>
+      <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+    </NativeSetting>
+  );
+}
+
+/** Server-side omp-web setting (issue #275): cross-session agent tools.
+ * Off by default; mirrors AutoResumeSessionsSetting above. */
+function AgentToolsSetting() {
+  const { t } = useI18n();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/web-settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { agentToolsEnabled?: boolean } | null) => { if (alive) setEnabled(data?.agentToolsEnabled === true); })
+      .catch(() => { if (alive) setEnabled(false); });
+    return () => { alive = false; };
+  }, []);
+  const change = async (next: boolean) => {
+    const previous = enabled;
+    setEnabled(next);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentToolsEnabled: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      setEnabled(previous);
+      toast.error(t("settingsConfig.agentToolsSaveFailed"), error instanceof Error ? error.message : String(error));
+    }
+  };
+  return (
+    <NativeSetting searchId="agent-tools-cross-session" label={t("settingsConfig.agentTools")} description={t("settingsConfig.agentToolsDesc")}>
       <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
     </NativeSetting>
   );
@@ -807,6 +774,12 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const { fontSize, setFontSize } = useFontSize();
   const { uiScale, setUiScale } = useUiScale();
   const { touchTargets, setTouchTargets } = useTouchTargets();
+  const {
+    preset: recentRunsPreset,
+    customValue: recentRunsCustomValue,
+    setPreset: setRecentRunsPreset,
+    setCustomValue: setRecentRunsCustomValue,
+  } = useRecentRunsLimit();
   const {
     isSupported: ttsSupported,
     autoPlayEnabled: ttsAutoPlay,
@@ -1327,6 +1300,40 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       <option value="xl" style={nativeOptionStyle}>{t("settingsConfig.fontSizeXLarge")}</option>
                     </select>
                   </NativeSetting>
+                  <NativeSetting searchId="recent-runs-limit" label={t("settingsConfig.recentRunsLimit")} description={t("settingsConfig.recentRunsLimitDesc")} scope="UI">
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <select
+                        style={nativeSelectStyle}
+                        value={recentRunsPreset}
+                        onChange={(e) => setRecentRunsPreset(e.target.value as RecentRunsLimitPreset)}
+                      >
+                        <option value="10" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption10")}</option>
+                        <option value="15" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption15")}</option>
+                        <option value="20" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption20")}</option>
+                        <option value="custom" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOptionCustom")}</option>
+                      </select>
+                      {recentRunsPreset === "custom" && (
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={recentRunsCustomValue}
+                          onChange={(e) => setRecentRunsCustomValue(Number(e.target.value))}
+                          style={{
+                            width: 80,
+                            height: "var(--control-height)",
+                            padding: "0 10px",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-control)",
+                            background: "var(--bg)",
+                            color: "var(--text)",
+                            fontSize: "var(--text-sm)",
+                          }}
+                          placeholder={t("settingsConfig.recentRunsCustomPlaceholder")}
+                        />
+                      )}
+                    </div>
+                  </NativeSetting>
                   <NativeSetting searchId="ui-scale" label={t("settingsConfig.uiScale")} description={t("settingsConfig.uiScaleDesc")} scope="UI">
                     <select
                       style={nativeSelectStyle}
@@ -1758,6 +1765,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 </div>
 
                 <AutoResumeSessionsSetting />
+
+                <AgentToolsSetting />
 
                 <AgentEnvSetting />
 

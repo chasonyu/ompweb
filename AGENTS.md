@@ -61,6 +61,7 @@ Shared foundations in `lib/omp/`:
 ```
 app/api/
   sessions/route.ts               GET  list all sessions
+  sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/export/route.ts   GET exported HTML for a session
@@ -124,6 +125,8 @@ lib/
   notification-client.ts  browser: device id, prefs store, service worker + push subscription
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
+  session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
+  session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
@@ -150,7 +153,8 @@ components/
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
-  NotificationList.tsx right-panel Notifications tab: the persisted notification history (`lib/notification-history.ts`)
+  NotificationList.tsx notification history list + Mark all read/Clear actions (mobile right-panel tab, desktop bell popover)
+  NotificationBell.tsx desktop top-bar bell: unread badge + floating NotificationList popover
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
@@ -239,9 +243,21 @@ Client code (`components/`, `hooks/`) must not call `AbortSignal.timeout`,
 the whole tree shows the "unexpected error" screen. Use `AbortController` + timers and
 executor-style promises instead. Server code may use them freely.
 
-### Two kinds of branching — don't confuse them
+### Editing and branching — don't confuse them
 - **Fork** ("Fork a new session from this point" button, `messageView.newSessionTitle`, on user and assistant messages; only offered while the session is idle — ChatWindow gates it on `!sessionBusy && !isNew`): creates a new independent `.jsonl` file via omp's `branch` RPC. Shown as a child in the sidebar tree via `parentSession` header field. `branch` only takes a user entry and keeps the history *before* it, so `lib/chat-fork.ts` maps rows: a user prompt forks at itself and its returned text prefills the fork's composer (edit-and-resend, text only — attached images are not restored); an assistant reply forks at the next user prompt so the reply is kept; the newest reply falls back to its own prompt with the prefill. Rows that would edit the very first prompt (an empty fork) offer no fork.
-- **In-session branch** (Continue button / BranchNavigator): navigates the entry tree within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
+- **Edit** (`edit_message`, user-message button): moves the live conversation's history to before that user entry; it is not a read-only historical view or an explicit Fork. `lib/omp/session-edit-extension.mjs`, explicitly loaded on spawn/restart, calls omp's public `ctx.navigateTree(entryId, { summarize: false })` and appends a non-message `omp-web-history-navigation` entry. Node never imports the Bun-only SDK or rewrites the JSONL.
+  - Require authoritative `get_state.isSettled === true` and reject pending background work; runtimes without settlement reporting fail explicitly. Preserve run/edit fencing, including rename and automatic-title fallbacks, and do not report success after an observed edit-time native persistence error.
+  - `SessionEditResult` remains `{ sessionId: string, cancelled: boolean, leafId: string | null }`. The returned ID identifies the confirmed post-edit conversation. Single-owner Edit keeps ID/file; a non-owner's native copy-on-write relocation is expected. Server persistence notices feed `applyIdentity` and registry aliases; the HTTP result drives client identity adoption (there is no public identity-change frame). Reload the confirmed target before text prefill, reject unrelated switches, and preserve the original file and old branches.
+  - The private `/omp-web-edit` transport uses `prompt`, so installed input hooks must pass the internal command through unchanged. OMP v18.12.6 invokes input hooks before command dispatch; registration checks alone do not bypass them. A temporary-hook probe confirmed consumption can intercept the command without an agent run. No input-handler registrations were found in the 20 official hook/extension TypeScript examples examined, and the official RPC fixture matches `consume:`, `transform:` and `slow:` rather than slash commands. Conflict probability is unmeasured and no known shipped third-party conflict is established. This is an explicit compatibility boundary, not a promise of arbitrary plugin support or a requirement for universal hook-free upstream RPC.
+  - Preserve ordinary native storage/error semantics: appends commonly reach the OS page cache synchronously, persistence failures latch and emit `source: "session-persistence"`, `level: "error"` notices, and native `flush()` throws latched errors. An append returning alone does not prove error-free persistence; surface observed edit-time write failures rather than claim success. Edit does not introduce a stronger fsync guarantee or require a new global durability API.
+  - A native `prompt` acknowledgement may have no data; only the request-correlated extension result confirms Edit. An observed persistence-error notice is not handler completion: keep the operation fence until the handler completes, or await child teardown on uncertain completion before unlocking. If an input hook invokes an agent, an observed run must retain run ownership; an acknowledged but not-yet-started agent cannot leave an unfenced startup gap and requires awaited teardown.
+  - Prefill only the selected message's text, not its original images. Preserve existing drafts, newer typing and composer attachments through pending edits, cancellation, errors and genuine navigation. `submissionBlocked` keeps asynchronous dictation from submitting or clearing the composer without disabling recording pause/resume/discard. `session_history_changed` carries the leaf marker; the initiating tab deduplicates its own delayed echo without resetting a newer view or run. Editing does not undo filesystem/tool side effects.
+  - Legal identity moves keep the hook and composer mounted. Transfer drafts capacity-neutrally and carry the exact source snapshot so input completed in the same React batch is merged, not overwritten or duplicated. Pending attachment reads, recordings and recovery operations retain their owner across the move; genuine navigation remains isolated. Draft text survives full-page reload via sessionStorage; attachment payloads remain memory-only.
+  - The confirmed-move callback synchronously calls `ChatInputHandle.retargetPendingRecovery(from, to)` before state updates or parent callbacks. This advances only captured queue-recovery ownership, closing the acknowledgement-to-commit gap; layout hydration still owns the live composer key/state. Do not turn this pre-commit ownership handoff into eager draft hydration.
+  - Pending transcription keeps its original server scope/job/claim ownership. Confirmed moves record a tab-local recovery association so the target can rediscover that job after navigation/remount; other clients' drafts and server scopes are not migrated. A hard reload before an upload acknowledgement can leave multiple possible source jobs; retain recovery and report ambiguity rather than guess or reupload.
+  - Event connections own their readiness waits: replacement and unmount settle the old wait as closed, clear its timers/coalesced work and close its observer. Late continuations must not attach streams to an unmounted hook or let a stale connection authorize a new operation. Keep lifetime cleanup separate from the mount-load latch so StrictMode setup/cleanup replay still cleans up observers attached afterward.
+  Ordinary `ChatInput.onSend` returns `Promise<PromptSubmissionResult>` (`accepted` / `rejected` / `superseded`). Only rejection restores composed text/file contents and images through `recoverDraft`; its receipt supplies the promoted real-session draft key when a new chat became a session, otherwise the composer uses the originating key captured before submission. Superseded failures must not reinsert a processed turn or reset a newer run. The composer owns recovery; `useAgentSession.handleSend` must not separately insert failed-send text and duplicate it.
+- **In-session branch** (Continue button / BranchNavigator): reads a historical view of the entry tree within the same file; it does not change the live agent's context. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=` through `handleLeafChange`; never use that read-only path to implement Edit.
 
 ### ToolCall field normalization
 Sessions store toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and streaming event handling.
@@ -513,10 +529,16 @@ during the wait.
 - `GET /api/projects` re-authorizes registered roots with `allowFileRoot()` —
   the in-memory browse allowlist does not survive restarts, and empty managed
   projects derive no root from sessions.
-- The client sorts the merged list by most-recently-added (registration
-  order), then by path for session-discovered projects
-  (`lib/project-ordering.ts`); the order deliberately does NOT depend on
-  session activity, so project rows never jump around while sessions refresh.
+- By default (sort "None") the client orders the merged list manually
+  (`sortOrder`, set by drag/Move up/down), then most-recently-added, then by
+  path (`lib/project-ordering.ts`), so rows never jump while sessions refresh.
+  The header sort button (`omp-web:project-sort` in `localStorage`, per
+  browser) switches to Alphabetical (label A→Z) or Last updated (newest last
+  message first: `lastMessageAt` from the session tail scan, else the file
+  mtime) — the latter deliberately reorders on activity. While a
+  sort is active, rows get a pin toggle: pinned projects (`pinOrder` in the
+  registry, pinned to the end of the group) lead in their own manual order and
+  alone keep Move up/down and drag; pins are ignored under "None".
   Expanded project paths live
   in `localStorage` (`omp-web:expanded-projects`), defaulting to only the
   active/restored project expanded, and stale keys are pruned against the
@@ -670,10 +692,10 @@ during the wait.
   unfinished job is a no-op; a `DELETE` without `claim` discards and aborts
   the upstream request.
 - Two tokens, never merged. The tab token (sessionStorage) identifies the
-  job owner: it survives the composer remounting (`AppShell` keys
-  `ChatWindow` by session), gets the 15s first claim, and alone gets the
-  send/queue choice back. A duplicated tab copies it, so exclusivity comes
-  from the claim token, which is per hook instance.
+  job owner: it survives genuine-navigation composer remounts (a confirmed
+  Edit identity move keeps the composer mounted), gets the 15s first claim,
+  and alone gets the send/queue choice back. A duplicated tab copies it, so
+  exclusivity comes from the claim token, which is per hook instance.
 - The send/queue choice (`after`: send | steer | followup) is uploaded with
   the recording, kept on the job, and returned with the owner's claim. Never
   keep it only in component state: a session switch remounts the composer and
@@ -811,7 +833,9 @@ motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
 `components/ui/` holds the shared primitives (built on `@base-ui/react`):
 `primitives.tsx` (Dialog/Tooltip/Collapsible), `field.tsx` (form fields +
 ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell).
-Toasts are not stored. The right panel's Notifications tab lists the server's
+Toasts are not stored. The notification list (`NotificationList`: the desktop
+top-bar bell's popover, `NotificationBell`; the right panel's Notifications tab
+on mobile only, `isMobile`) lists the server's
 notification history (`lib/notification-history.ts`, a mirror of
 `/api/notifications/history`): `publishNotification` records every
 notification type some device has turned on (completed, input, error, model
@@ -823,8 +847,11 @@ tab receives over SSE without a refetch, and reloads when the service worker
 reports a push it showed. Entries store the `NotificationEvent` and render in
 the viewer's language; clicking one, or Enter, marks it read and opens its
 session (`OPEN_SESSION_EVENT`).
-Unread entries badge the right-panel toggle, which then opens the Notifications
-tab; entries become read when the user leaves that tab (only the entries it
+On desktop the bell carries the unread badge and its popover (base-ui Popover,
+380px wide, at most 480px tall, the list scrolls) closes when a notification
+opens a session. On mobile unread entries badge the right-panel toggle, which
+then opens the Notifications tab. Entries become read when the user closes the
+popover or leaves that tab (only the entries it
 showed), uses Mark all as read, or opens the notification from its toast or
 row, and a reused id (`<sessionId>:<type>`) is unread again. Mark-read, remove
 and clear update the list at once, then the server; a failed request reloads
