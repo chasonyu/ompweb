@@ -104,6 +104,11 @@ test("browser chrome follows the selected theme and only follows OS changes in s
   assertTheme("dracula", "#282A36", true, ["dark", "theme-dracula"]);
   await act(() => hook.result.current.setTheme("catppuccin-latte"));
   assertTheme("catppuccin-latte", "#EFF1F5", false, ["theme-catppuccin-latte"]);
+  await act(() => hook.result.current.setTheme("codex-light"));
+  assertTheme("codex-light", "#FFFFFF", false, ["theme-codex-light"]);
+  hook.unmount();
+  hook = renderHook(() => useTheme());
+  assertTheme("codex-light", "#FFFFFF", false, ["theme-codex-light"]);
   await act(() => hook.result.current.setTheme("system"));
   assertTheme("dark", "#1B1916", true, ["dark", "theme-dark"], "system");
   await changeOS(false);

@@ -2,7 +2,7 @@
 
 import { createElement, useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
-export type LightTheme = "light" | "one-light" | "catppuccin-latte" | "rose-pine-dawn";
+export type LightTheme = "codex-light" | "light" | "one-light" | "catppuccin-latte" | "rose-pine-dawn";
 export type DarkTheme =
   | "dark"
   | "omp"
@@ -27,6 +27,7 @@ export type ThemeDefinition = {
 };
 
 export const LIGHT_THEMES: ReadonlyArray<ThemeDefinition> = [
+  { id: "codex-light", name: "Codex Light", mode: "light", bg: "#FFFFFF", accent: "#1A1C1F" },
   { id: "light", name: "Light (default)", mode: "light", bg: "#FAF9F6", accent: "#B03E22" },
   { id: "one-light", name: "One Light", mode: "light", bg: "#FAFAFA", accent: "#2F65D9" },
   { id: "catppuccin-latte", name: "Catppuccin Latte", mode: "light", bg: "#EFF1F5", accent: "#1E66F5" },
@@ -49,10 +50,11 @@ export const DARK_THEMES: ReadonlyArray<ThemeDefinition> = [
 export const ALL_THEMES: ReadonlyArray<ThemeDefinition> = [...LIGHT_THEMES, ...DARK_THEMES];
 
 export function isDarkTheme(theme: Theme): boolean {
-  return theme !== "light" && theme !== "one-light" && theme !== "catppuccin-latte" && theme !== "rose-pine-dawn";
+  return theme !== "codex-light" && theme !== "light" && theme !== "one-light" && theme !== "catppuccin-latte" && theme !== "rose-pine-dawn";
 }
 
 const VALID_PREFERENCES: Record<string, true> = {
+  "codex-light": true,
   light: true,
   "one-light": true,
   "catppuccin-latte": true,
