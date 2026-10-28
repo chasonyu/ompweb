@@ -1179,6 +1179,14 @@ pre, code {
   margin: calc(var(--markdown-space) * 4) 0;
   padding: 0 calc(var(--markdown-space) * 4);
 }
+.markdown-assistant-message hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  height: 0;
+  background: none;
+  margin: calc(var(--markdown-space) * 7) 0;
+}
+.markdown-body.markdown-assistant-message hr + * { margin-top: 0; }
 .markdown-assistant-message .markdown-table-wrap {
   border: 0;
   border-radius: 0;
