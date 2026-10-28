@@ -960,3 +960,59 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
   assert.deepEqual(forked, [["user-7", true]]);
   view.unmount();
 });
+
+
+test("only ordinary assistant prose gets the assistant Markdown scope, including streaming", () => {
+  const source = "# Heading\n\nParagraph with **emphasis**.\n\n```js\nconst answer = 42;\n```";
+  for (const isStreaming of [false, true]) {
+    const html = renderToStaticMarkup(React.createElement(MessageView, {
+      message: { role: "assistant", content: [{ type: "text", text: source }] }, isStreaming,
+    }));
+    const doc = new window.DOMParser().parseFromString(html, "text/html");
+    const scope = doc.querySelector("[data-message-text] > .markdown-assistant-message");
+    assert.ok(scope, "assistant text must opt into its own presentation scope");
+    assert.equal(scope.querySelector("h1")?.textContent, "Heading");
+    assert.equal(scope.querySelector(".markdown-code-lang")?.textContent, "js");
+    assert.equal(scope.querySelector("pre")?.textContent, "const answer = 42;");
+  }
+  for (const message of [
+    { role: "user", content: source },
+    { role: "custom", customType: "notice", display: true, content: source },
+  ]) {
+    const html = renderToStaticMarkup(React.createElement(MessageView, { message }));
+    assert.doesNotMatch(html, /markdown-assistant-message/);
+    assert.match(html, /Heading/);
+  }
+  assert.doesNotMatch(renderToStaticMarkup(React.createElement(SafeMarkdownBody, null, source)), /markdown-assistant-message/);
+});
+
+test("assistant code retains exact copy feedback and line numbers after streaming completes", async (t) => {
+  const code = "const answer = 42;\nconsole.log(answer);";
+  const writes = [];
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  t.after(() => {
+    if (originalMatchMedia) window.matchMedia = originalMatchMedia;
+    else delete window.matchMedia;
+  });
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (value) => { writes.push(value); } },
+  });
+  t.after(() => { delete navigator.clipboard; });
+  const message = { role: "assistant", content: [{ type: "text", text: `\`\`\`js\n${code}\n\`\`\`` }] };
+  const view = render(React.createElement(MessageView, { message, isStreaming: true }));
+  const block = () => view.container.querySelector(".markdown-assistant-message .markdown-code-block");
+  assert.equal(block().querySelector("pre").textContent, code);
+  assert.equal(block().querySelector(".linenumber"), null);
+  await act(async () => { fireEvent.click(block().querySelector("button")); });
+  assert.deepEqual(writes, [code]);
+  assert.equal(block().querySelector("button").textContent, "copied");
+  view.rerender(React.createElement(MessageView, { message, isStreaming: false }));
+  await waitFor(() => assert.equal(block().querySelectorAll(".linenumber").length, 2));
+  const source = block().querySelector("pre").cloneNode(true);
+  source.querySelectorAll(".linenumber").forEach((node) => node.remove());
+  assert.equal(source.textContent, code);
+  assert.ok(block().querySelector("pre .token"), "syntax highlighting remains available");
+  await act(async () => { view.unmount(); });
+});

@@ -14,13 +14,13 @@ function PlainCode({ code }: { code: string }) {
     <pre
       style={{
         margin: 0,
-        padding: "11px 13px",
+        padding: "var(--markdown-code-padding, 11px 13px)",
         fontSize: "var(--chat-code-font-size)",
-        lineHeight: 1.62,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
+        lineHeight: "var(--markdown-code-line-height, 1.62)",
+        whiteSpace: "var(--markdown-code-white-space, pre-wrap)" as "pre-wrap",
+        wordBreak: "var(--markdown-code-word-break, break-word)" as "break-word",
         color: "var(--text)",
-        backgroundColor: "color-mix(in srgb, var(--bg) 88%, var(--bg-panel))",
+        backgroundColor: "var(--markdown-code-background, color-mix(in srgb, var(--bg) 88%, var(--bg-panel)))",
         fontFamily: "var(--font-mono)",
       }}
     >
@@ -55,11 +55,11 @@ export function SyntaxHighlightedCode({ code, lang }: Props) {
       lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
       customStyle={{
         margin: 0,
-        padding: "11px 13px",
+        padding: "var(--markdown-code-padding, 11px 13px)",
         fontSize: "var(--chat-code-font-size)",
-        lineHeight: 1.62,
+        lineHeight: "var(--markdown-code-line-height, 1.62)",
         borderRadius: 0,
-        backgroundColor: "color-mix(in srgb, var(--bg) 88%, var(--bg-panel))",
+        backgroundColor: "var(--markdown-code-background, color-mix(in srgb, var(--bg) 88%, var(--bg-panel)))",
       }}
       codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
     >

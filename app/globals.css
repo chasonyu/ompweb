@@ -1109,6 +1109,119 @@ pre, code {
   color: var(--text);
 }
 
+/* Only ordinary assistant replies use the chat Markdown rhythm. Shared previews
+   and custom messages retain their existing presentation. */
+.markdown-assistant-message {
+  --markdown-space: calc(var(--chat-font-size) / 4);
+  --markdown-code-padding: calc(var(--markdown-space) * 4);
+  --markdown-code-line-height: 1.625;
+  --markdown-code-background: var(--bg-subtle);
+  --markdown-code-white-space: pre;
+  --markdown-code-word-break: normal;
+  line-height: 1.625;
+}
+.markdown-assistant-message p { margin: 0 0 var(--markdown-space); }
+.markdown-assistant-message > p:not(:first-child) { margin-top: calc(var(--markdown-space) * 2); }
+.markdown-assistant-message > p + p { margin-block: calc(var(--markdown-space) * 4); }
+.markdown-assistant-message :is(h1, h2, h3, h4, h5, h6) {
+  font-family: inherit;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: normal;
+}
+.markdown-assistant-message h1 {
+  font-size: 1.5em;
+  line-height: calc(var(--markdown-space) * 8);
+  margin: calc(var(--markdown-space) * 4) 0 calc(var(--markdown-space) * 2);
+}
+.markdown-assistant-message h2 {
+  font-size: 1.25em;
+  line-height: calc(var(--markdown-space) * 7);
+  margin: calc(var(--markdown-space) * 4) 0 var(--markdown-space);
+}
+.markdown-assistant-message h3 {
+  font-size: 1.125em;
+  line-height: calc(var(--markdown-space) * 7);
+  margin: calc(var(--markdown-space) * 4) 0 var(--markdown-space);
+}
+.markdown-assistant-message h4 {
+  font-size: 1em;
+  line-height: 1.5;
+  margin: calc(var(--markdown-space) * 4) 0 0;
+}
+.markdown-assistant-message :is(h5, h6) { font-size: 1em; line-height: inherit; margin: 0; }
+.markdown-assistant-message > :is(h1, h2, h3, h4) + p { margin-top: 0; }
+.markdown-assistant-message :is(ul, ol) { margin: 0; padding-inline-start: 1.625em; }
+.markdown-assistant-message li { margin: 0; padding-inline-start: calc(var(--markdown-space) * 1.5); }
+.markdown-assistant-message li > :is(ul, ol) { margin: 0; }
+.markdown-assistant-message :is(ul, ol) ul > li { list-style-type: circle; }
+.markdown-assistant-message :is(ul, ol) :is(ul, ol) ul > li { list-style-type: square; }
+.markdown-assistant-message li::marker { color: var(--text); font-weight: 400; }
+.markdown-assistant-message li > p { margin: 0; }
+.markdown-assistant-message li > p + p { margin-top: 1em; }
+.markdown-assistant-message .contains-task-list { padding-inline-start: 0; }
+.markdown-assistant-message .task-list-item { padding-inline-start: 25px; }
+.markdown-assistant-message strong { color: inherit; font-weight: 600; }
+.markdown-assistant-message em { color: inherit; }
+.markdown-assistant-message .markdown-inline-code {
+  background: var(--bg-subtle);
+  border-radius: 6px;
+  padding: 1px 6px;
+  box-shadow: none;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.markdown-assistant-message blockquote {
+  background: transparent;
+  color: inherit;
+  border-left: 2px solid var(--border);
+  border-radius: 0;
+  margin: calc(var(--markdown-space) * 4) 0;
+  padding: 0 calc(var(--markdown-space) * 4);
+}
+.markdown-assistant-message .markdown-table-wrap {
+  border: 0;
+  border-radius: 0;
+  margin: calc(var(--markdown-space) * 4) 0;
+}
+.markdown-assistant-message table { font-size: max(var(--chat-code-font-size), calc(var(--chat-font-size) * .875)); font-variant-numeric: tabular-nums; }
+.markdown-assistant-message :is(th, td) {
+  padding: calc(var(--markdown-space) * 2.5) calc(var(--markdown-space) * 6) calc(var(--markdown-space) * 2.5) 0;
+}
+.markdown-assistant-message th {
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+  padding-block: calc(var(--markdown-space) * 2);
+}
+.markdown-assistant-message tbody tr:nth-child(even) td { background: transparent; }
+.markdown-assistant-message td:last-child { padding-inline-end: 0; }
+.markdown-assistant-message .markdown-code-block {
+  margin-block: calc(var(--markdown-space) * 5);
+  border: 0;
+  border-radius: 16px;
+  background: var(--markdown-code-background);
+  box-shadow: none;
+}
+.markdown-assistant-message .markdown-code-header {
+  background: transparent;
+  border-bottom: 0;
+  padding: calc(var(--markdown-space) * 3) calc(var(--markdown-space) * 4) 0;
+  font-size: var(--chat-code-font-size);
+}
+.markdown-assistant-message .markdown-code-lang { font-weight: 400; }
+.markdown-assistant-message .markdown-code-action {
+  background: transparent;
+  border-color: transparent;
+  font-size: inherit;
+  border-radius: 6px;
+}
+.markdown-assistant-message .markdown-code-action:hover:not(:disabled) { background: var(--bg-hover); }
+.markdown-assistant-message .markdown-code-action.is-copied { color: var(--status-success); }
+.markdown-assistant-message .markdown-code-action.is-active { background: var(--bg-selected); }
+.markdown-assistant-message .markdown-code-block pre { overflow-x: auto; }
+.markdown-assistant-message > :last-child { margin-bottom: 0; }
+
 .mermaid-block {
   padding: 12px;
   overflow-x: auto;

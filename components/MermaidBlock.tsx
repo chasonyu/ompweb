@@ -279,11 +279,11 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
       {isStreaming || !HighlightedCode ? (
         <pre style={{
           margin: 0,
-          padding: "11px 13px",
+          padding: "var(--markdown-code-padding, 11px 13px)",
           fontSize: "var(--chat-code-font-size)",
-          lineHeight: 1.62,
+          lineHeight: "var(--markdown-code-line-height, 1.62)",
           overflowX: "auto",
-          backgroundColor: "color-mix(in srgb, var(--bg) 88%, var(--bg-panel))",
+          backgroundColor: "var(--markdown-code-background, color-mix(in srgb, var(--bg) 88%, var(--bg-panel)))",
         }}>
           <code style={{ fontFamily: "var(--font-mono)" }}>{code}</code>
         </pre>
