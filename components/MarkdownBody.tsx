@@ -21,7 +21,17 @@ interface MarkdownBodyProps {
   autoCharts?: boolean;
 }
 
+// Inspect rendered text, so link targets and image descriptions do not change
+// paragraph spacing. Inline code and formatting still contribute visible text.
+function paragraphText(children: ReactNode): string {
+  return Children.toArray(children).map((child) => {
+    if (typeof child === "string" || typeof child === "number") return String(child);
+    return isValidElement<{ children?: ReactNode }>(child) ? paragraphText(child.props.children) : "";
+  }).join("");
+}
+
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, suppressImages = false, autoCharts = false }: MarkdownBodyProps) {
+  const isAssistant = className?.split(/\s+/).includes("markdown-assistant-message") ?? false;
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
   const githubRepo = useContext(GithubRepoContext);
@@ -93,6 +103,13 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       });
 
     return {
+    ...(isAssistant ? {
+      p({ children, node, ...props }) {
+        // react-markdown's node metadata must not become a DOM attribute.
+        void node;
+        return <p {...props} data-markdown-han-text={/\p{Script=Han}/u.test(paragraphText(children)) ? "true" : undefined}>{children}</p>;
+      },
+    } satisfies Components : {}),
     code: markdownCodeRenderer({ isStreaming, inlineClassName: "markdown-inline-code" }),
     pre({ children }) {
       return <>{children}</>;
@@ -154,7 +171,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       );
     },
     };
-  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, autoCharts]);
+  }, [isAssistant, isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, autoCharts]);
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>

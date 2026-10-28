@@ -1109,79 +1109,152 @@ pre, code {
   color: var(--text);
 }
 
-/* Only ordinary assistant replies use the chat Markdown rhythm. Shared previews
-   and custom messages retain their existing presentation. */
+/* Codex's native chat palette is independent of the surrounding UI theme. */
+:root {
+  --assistant-text: #1a1c1f;
+  --assistant-surface: #fff;
+  --assistant-soft: color-mix(in oklab, #1a1c1f 5%, transparent);
+  --assistant-border: color-mix(in oklab, #1a1c1f 12%, transparent);
+  --assistant-border-subtle: color-mix(in oklab, #1a1c1f 5%, transparent);
+  --assistant-text-tertiary: rgb(26 28 31 / 65%);
+}
+html.dark, html.omp {
+  --assistant-text: #dfdfdf;
+  --assistant-surface: #181818;
+  --assistant-soft: color-mix(in oklab, white 8%, transparent);
+  --assistant-border: color-mix(in oklab, white 16%, transparent);
+  --assistant-border-subtle: color-mix(in oklab, white 4%, transparent);
+  --assistant-text-tertiary: rgb(255 255 255 / 65%);
+}
+
+/* Keep native chat typography local to ordinary assistant replies. Shared
+   renderers retain their existing fallbacks outside this scope. */
 .markdown-assistant-message {
   --markdown-space: calc(var(--chat-font-size) / 4);
-  --markdown-code-padding: calc(var(--markdown-space) * 4);
-  --markdown-code-line-height: 1.625;
+  --markdown-line-height: calc(var(--chat-font-size) * 1.625);
+  --markdown-code-padding: 0 16px 12px;
+  --markdown-code-line-height: max(1.5em, 20px);
   --markdown-code-background: transparent;
   --markdown-code-white-space: pre;
   --markdown-code-word-break: normal;
-  line-height: 1.625;
+  --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 430;
+  font-synthesis-weight: none;
+  -webkit-font-smoothing: antialiased;
+  color: var(--assistant-text);
+  line-height: var(--markdown-line-height);
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.markdown-assistant-message :is(p, ul, ol, li, table):where(:not(.table-auto-chart *)) {
+  font-size: var(--chat-font-size);
+  line-height: var(--markdown-line-height);
 }
 .markdown-assistant-message p { margin: 0 0 var(--markdown-space); }
 .markdown-assistant-message > p:not(:first-child) { margin-top: calc(var(--markdown-space) * 2); }
-.markdown-assistant-message > p + p { margin-block: calc(var(--markdown-space) * 4); }
+.markdown-body.markdown-assistant-message > p + p { margin-block: calc(var(--markdown-space) * 4); }
 .markdown-assistant-message :is(h1, h2, h3, h4, h5, h6) {
   font-family: inherit;
   font-weight: 600;
-  color: var(--text);
+  color: inherit;
   letter-spacing: normal;
 }
 .markdown-assistant-message h1 {
-  font-size: 1.5em;
+  font-size: calc(var(--chat-font-size) * 1.5);
   line-height: calc(var(--markdown-space) * 8);
   margin: calc(var(--markdown-space) * 4) 0 calc(var(--markdown-space) * 2);
 }
 .markdown-assistant-message h2 {
-  font-size: 1.25em;
+  font-size: calc(var(--chat-font-size) * 1.25);
   line-height: calc(var(--markdown-space) * 7);
   margin: calc(var(--markdown-space) * 4) 0 var(--markdown-space);
 }
 .markdown-assistant-message h3 {
-  font-size: 1.125em;
+  font-size: calc(var(--chat-font-size) * 1.125);
   line-height: calc(var(--markdown-space) * 7);
   margin: calc(var(--markdown-space) * 4) 0 var(--markdown-space);
 }
 .markdown-assistant-message h4 {
-  font-size: 1em;
-  line-height: 1.5;
+  font-size: var(--chat-font-size);
+  line-height: calc(var(--markdown-space) * 6);
   margin: calc(var(--markdown-space) * 4) 0 0;
 }
-.markdown-assistant-message :is(h5, h6) { font-size: 1em; line-height: inherit; margin: 0; }
-.markdown-assistant-message > :is(h1, h2, h3, h4) + p { margin-top: 0; }
-.markdown-assistant-message :is(ul, ol) { margin: 0; padding-inline-start: 1.625em; }
+.markdown-assistant-message :is(h5, h6) { font-size: var(--chat-font-size); line-height: var(--markdown-line-height); margin: 0; }
+.markdown-body.markdown-assistant-message > :is(h1, h2, h3, h4) + p { margin-top: 0; }
+.markdown-assistant-message ul { list-style-type: disc; }
+.markdown-assistant-message ol { list-style-type: decimal; }
+.markdown-assistant-message :is(ul, ol) ul { list-style-type: circle; }
+.markdown-assistant-message :is(ul, ol) :is(ul, ol) ul { list-style-type: square; }
+.markdown-assistant-message :is(ul, ol) { margin: 0; padding-inline-start: var(--markdown-line-height); }
 .markdown-assistant-message li { margin: 0; padding-inline-start: calc(var(--markdown-space) * 1.5); }
 .markdown-assistant-message li > :is(ul, ol) { margin: 0; }
 .markdown-assistant-message :is(ul, ol) ul > li { list-style-type: circle; }
 .markdown-assistant-message :is(ul, ol) :is(ul, ol) ul > li { list-style-type: square; }
-.markdown-assistant-message li::marker { color: var(--text); font-weight: 400; }
+.markdown-assistant-message li::marker { color: var(--assistant-text); font-weight: 600; }
+.markdown-assistant-message li > :first-child:not(h1, h2, h3) { margin-top: 0; margin-bottom: 0; }
+.markdown-assistant-message li > :last-child:not(h1, h2, h3) { margin-bottom: 0; }
+.markdown-assistant-message li > :is(h1, h2, h3):first-child { margin-top: 0; }
+.markdown-assistant-message li > :is(h1, h2, h3):last-child { margin-bottom: 0; }
 .markdown-assistant-message li > p { margin: 0; }
-.markdown-assistant-message li > p + p { margin-top: 1em; }
-.markdown-assistant-message .contains-task-list { padding-inline-start: 0; }
+.markdown-assistant-message li > p + p { margin-top: calc(var(--markdown-space) * 4); }
+.markdown-assistant-message .contains-task-list { padding-inline-start: 0; list-style-type: none; }
 .markdown-assistant-message .task-list-item { padding-inline-start: 25px; }
 .markdown-assistant-message strong { color: inherit; font-weight: 600; }
 .markdown-assistant-message em { color: inherit; }
+html .markdown-body.markdown-assistant-message a {
+  color: inherit;
+  text-decoration: underline dotted var(--assistant-text-tertiary) 1px;
+  text-underline-offset: 2px;
+  text-underline-position: from-font;
+}
+html .markdown-body.markdown-assistant-message a:hover { text-decoration-color: currentColor; }
+html.omp .markdown-assistant-message a::after { content: none; }
 .markdown-assistant-message .markdown-inline-code {
-  background: var(--bg-subtle);
+  background: color-mix(in srgb, var(--assistant-soft) 60%, var(--assistant-text) 6%);
   border-radius: 6px;
   padding: 1px 6px;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: .92em;
+  font-weight: inherit;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   box-shadow: none;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
 .markdown-assistant-message blockquote {
-  background: transparent;
-  color: inherit;
-  border-left: 2px solid var(--border);
+  margin: 0 0 calc(var(--markdown-space) * 2);
+  color: var(--assistant-text);
+  font-style: normal;
+  line-height: calc(var(--markdown-space) * 6);
+  padding-block: calc(var(--markdown-space) * 2);
+  padding-inline: calc(var(--markdown-space) * 6) 0;
+  border: 0;
   border-radius: 0;
-  margin: calc(var(--markdown-space) * 4) 0;
-  padding: 0 calc(var(--markdown-space) * 4);
+  position: relative;
+  background: transparent !important;
+}
+.markdown-assistant-message blockquote > :first-child { margin-top: 0; }
+.markdown-assistant-message blockquote > :last-child { margin-bottom: 0; }
+.markdown-assistant-message blockquote > p { font-weight: 400; margin: 0; }
+.markdown-assistant-message blockquote > p::before,
+.markdown-assistant-message blockquote > p::after { content: none; }
+.markdown-assistant-message blockquote::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: calc(var(--markdown-space) * 2);
+  bottom: calc(var(--markdown-space) * 2);
+  width: var(--markdown-space);
+  border-radius: calc(var(--markdown-space) / 2);
+  background: var(--assistant-border);
 }
 .markdown-assistant-message hr {
+  clear: both;
   border: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--assistant-border);
   height: 0;
   background: none;
   margin: calc(var(--markdown-space) * 7) 0;
@@ -1190,49 +1263,80 @@ pre, code {
 .markdown-assistant-message .markdown-table-wrap {
   border: 0;
   border-radius: 0;
-  margin: calc(var(--markdown-space) * 4) 0;
+  margin: calc(var(--markdown-space) * 4) 0 0;
 }
-.markdown-assistant-message table { font-size: max(var(--chat-code-font-size), calc(var(--chat-font-size) * .875)); font-variant-numeric: tabular-nums; }
+.markdown-assistant-message table {
+  width: fit-content;
+  margin: 0;
+  font-size: max(var(--chat-code-font-size), calc(var(--chat-font-size) * .875));
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
 .markdown-assistant-message :is(th, td) {
   padding: calc(var(--markdown-space) * 2.5) calc(var(--markdown-space) * 6) calc(var(--markdown-space) * 2.5) 0;
+  border-bottom-color: var(--assistant-border-subtle);
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 .markdown-assistant-message th {
   background: transparent;
   color: inherit;
   font-weight: 600;
+  line-height: calc(var(--markdown-space) * 4);
   padding-block: calc(var(--markdown-space) * 2);
+  border-bottom-color: var(--assistant-border);
 }
+.markdown-assistant-message th:last-child { padding-inline-end: calc(var(--markdown-space) * 10); }
 .markdown-assistant-message tbody tr:nth-child(even) td { background: transparent; }
 .markdown-assistant-message td:last-child { padding-inline-end: 0; }
+.markdown-assistant-message tbody tr:last-child td { padding-bottom: calc(var(--markdown-space) * 6); }
 .markdown-assistant-message .markdown-code-block {
   margin-block: calc(var(--markdown-space) * 5);
-  border: 0;
-  border-radius: 16px;
-  background: var(--bg-subtle);
+  border: 1px solid var(--assistant-border-subtle);
+  border-radius: 20px;
+  corner-shape: superellipse(1.1);
+  background-color: var(--assistant-surface);
+  background-image: linear-gradient(var(--assistant-soft), var(--assistant-soft));
   box-shadow: none;
 }
 .markdown-assistant-message .markdown-code-header {
   background: transparent;
   border-bottom: 0;
-  padding: calc(var(--markdown-space) * 3) calc(var(--markdown-space) * 4) 0;
+  min-height: 48px;
+  padding: 6px 6px 6px 16px;
+  color: var(--assistant-text);
   font-size: var(--chat-code-font-size);
+  font-weight: 500;
+  line-height: 20px;
 }
-.markdown-assistant-message .markdown-code-lang { font-weight: 400; }
+.markdown-assistant-message .markdown-code-lang { font-family: inherit; color: inherit; font-weight: 500; }
 .markdown-assistant-message .markdown-code-action {
   background: transparent;
   border-color: transparent;
+  color: inherit;
   font-size: inherit;
   border-radius: 6px;
 }
-.markdown-assistant-message .markdown-code-action:hover:not(:disabled) { background: var(--bg-hover); }
+.markdown-assistant-message .markdown-code-action:hover:not(:disabled) { background: var(--assistant-soft); border-color: transparent; color: inherit; }
 .markdown-assistant-message .markdown-code-action.is-copied { color: var(--status-success); }
-.markdown-assistant-message .markdown-code-action.is-active { background: var(--bg-selected); }
+.markdown-assistant-message .markdown-code-action.is-active { background: var(--assistant-soft); }
 .markdown-assistant-message .markdown-code-block pre {
   overflow-x: auto;
-  /* Prism's light theme sets an inline border; keep the streaming surface identical. */
+  font-family: var(--font-mono);
+  color: var(--assistant-text) !important;
+  /* Prism adds inline borders and a separate code line-height after loading. */
   border: 0 !important;
 }
-.markdown-assistant-message > :last-child { margin-bottom: 0; }
+.markdown-assistant-message .markdown-code-block pre code { line-height: inherit !important; }
+@media (min-width: 768px) {
+  .markdown-assistant-message { --markdown-code-padding: 0 20px 12px; }
+  .markdown-assistant-message .markdown-code-header { padding-inline-start: 20px; }
+}
+
+.markdown-body.markdown-assistant-message > p:last-child { margin-bottom: var(--markdown-space); }
+.markdown-body.markdown-assistant-message > p + p:last-child { margin-bottom: calc(var(--markdown-space) * 4); }
+.markdown-body.markdown-assistant-message > p[data-markdown-han-text]:has(+ p[data-markdown-han-text]) { margin-bottom: 4px; }
 
 .mermaid-block {
   padding: 12px;

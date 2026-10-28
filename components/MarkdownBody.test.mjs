@@ -204,3 +204,28 @@ test("opens the most specific roster entry, else a disk-backed stub for the base
     id: "Gone", agent: "Gone", status: "completed", index: 0, source: "history",
   });
 });
+
+test("assistant paragraphs mark visible Han text through inline formatting", () => {
+  const source = "普通中文\n\n**强调中文** and `代码`\n\n[链接中文](https://example.com)\n\nEnglish only";
+  for (const isStreaming of [false, true]) {
+    const html = renderToStaticMarkup(React.createElement(MarkdownBody, {
+      className: "extra markdown-assistant-message", isStreaming,
+    }, source));
+    assert.equal((html.match(/data-markdown-han-text="true"/g) ?? []).length, 3);
+    assert.match(html, /<p>English only<\/p>/);
+    assert.doesNotMatch(html, /\snode=/);
+  }
+});
+
+test("Han paragraph detection ignores metadata and preserves other Markdown hosts", () => {
+  const metadataOnly = '[English](https://example.com/中文 "中文 title")\n\n![中文 alt](https://example.com/image.png)';
+  const assistantHtml = renderToStaticMarkup(React.createElement(MarkdownBody, {
+    className: "markdown-assistant-message",
+  }, metadataOnly));
+  assert.doesNotMatch(assistantHtml, /data-markdown-han-text/);
+  for (const className of [undefined, "markdown-user-message", "markdown-custom-message", "markdown-file-preview"]) {
+    const html = renderToStaticMarkup(React.createElement(MarkdownBody, { className }, "中文 **内容**"));
+    assert.doesNotMatch(html, /data-markdown-han-text/);
+    assert.match(html, /中文 <strong>内容<\/strong>/);
+  }
+});
