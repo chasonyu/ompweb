@@ -196,7 +196,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply }: {
 
   return (
     <div style={{ marginBottom: 4 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <button
         type="button"
         aria-expanded={expanded}
