@@ -795,7 +795,7 @@ function AssistantMessageView({
       </div>
 
       {!isStreaming && (texts.some((text) => text.trim()) || time || canFork || (ttsSupported && speakableText.trim().length > 0)) && (
-        <div className="message-actions" data-actions-active={isThisSpeaking || forking || undefined} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
+        <div className="message-actions" data-actions-active={isThisSpeaking || forking || undefined} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 6 }}>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
             <MessageCopyActions texts={texts} bodyRef={bodyRef} />
             {ttsSupported && speakableText.trim().length > 0 && (

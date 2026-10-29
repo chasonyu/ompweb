@@ -1338,6 +1338,12 @@ html.omp .markdown-assistant-message a::after { content: none; }
 .markdown-body.markdown-assistant-message > p + p:last-child { margin-bottom: calc(var(--markdown-space) * 4); }
 .markdown-body.markdown-assistant-message > p[data-markdown-han-text]:has(+ p[data-markdown-han-text]) { margin-bottom: 4px; }
 
+/* Only the reply's outer edge is owned by the footer gap; keep spacing
+   between paragraphs and separate streamed text blocks intact. */
+.chat-message > [data-selection-scope="message"] > [data-message-text]:last-child > .markdown-assistant-message > :last-child {
+  margin-bottom: 0;
+}
+
 .mermaid-block {
   padding: 12px;
   overflow-x: auto;
