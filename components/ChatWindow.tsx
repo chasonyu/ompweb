@@ -3,7 +3,8 @@
 import { isUserTurnMessage, getUserPromptText } from "@/lib/user-turn";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { createContext, Fragment, memo, useContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { createPortal } from "react-dom";
 import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
@@ -184,19 +185,24 @@ export function OmpRuntimeVersion() {
   );
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: () => ReactNode }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply }: { messageCount: number; toolCallCount: number; children: () => ReactNode; reply?: (layout: ModelLabelLayout) => ReactNode }) {
   const { t, tn } = useI18n();
   const [expanded, setExpanded] = useState(false);
+  const [modelSlot, setModelSlot] = useState<HTMLDivElement | null>(null);
+  // Keep the process subtree mounted in place as the reply arrives or commits.
+  const layout = useCallback<ModelLabelLayout>((label) => modelSlot ? createPortal(label, modelSlot) : null, [modelSlot]);
   const parts = [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
   if (toolCallCount > 0) parts.push(tn("chatWindow.toolCallCount", toolCallCount));
 
   return (
     <div style={{ marginBottom: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
       <button
         type="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
         className="process-details-toggle"
+        style={{ minWidth: 0 }}
         title={expanded ? t("chatWindow.collapseProcessDetails") : t("chatWindow.expandProcessDetails")}
       >
         <Layers
@@ -219,16 +225,19 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
           {parts.join(" · ")}
         </span>
       </button>
+      <div ref={setModelSlot} style={{ minWidth: 0, overflowWrap: "anywhere" }} />
+      </div>
       {expanded && (
         <div style={{ marginTop: 3 }}>
           {children()}
         </div>
       )}
+      {reply?.(layout)}
     </div>
   );
 }
 
-type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] }) => ReactNode;
+type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout }) => ReactNode;
 
 /** Render a folded activity run exactly as it streamed: one entry per piece, never merged across messages. */
 export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityPiece[], renderMessage: RenderMessage): ReactNode[] {
@@ -243,6 +252,16 @@ export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityP
       sourceBlockIndices: piece.blocks.map((block) => msg.content.indexOf(block)),
     });
   });
+}
+
+type ModelLabelLayout = (label: ReactNode) => ReactNode;
+
+// Only the tail subscribes: token updates must not re-render the committed history.
+export const TranscriptTailContext = createContext<(layout?: ModelLabelLayout) => ReactNode>(() => null);
+
+function TranscriptTail({ modelLabelLayout }: { modelLabelLayout?: ModelLabelLayout }) {
+  const renderTail = useContext(TranscriptTailContext);
+  return renderTail(modelLabelLayout);
 }
 
 interface CommittedTranscriptProps {
@@ -288,7 +307,7 @@ interface CommittedTranscriptProps {
  * change `streamingMessage`, rendered separately) do not re-run the O(history)
  * grouping/splitting work at display-frame cadence.
  */
-const CommittedTranscript = memo(function CommittedTranscript({
+export const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
@@ -302,7 +321,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     messageRefs.current[refIndex] = el;
   };
 
-  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] } = {}): ReactNode => {
+  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout } = {}): ReactNode => {
     const msg = options.messageOverride ?? messages[idx];
     const isVisible = isUserTurnMessage(msg) || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
@@ -349,6 +368,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
         expandThinkingByDefault={expandThinkingByDefault}
         hideThinking={hideThinkingBlock}
         sourceBlockIndices={options.sourceBlockIndices}
+        modelLabelLayout={options.modelLabelLayout}
       />
     );
     if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
@@ -395,6 +415,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   }, [rows.length, visibleCount, nearBottom]);
 
   const rendered: ReactNode[] = [];
+  let tailAttached = false;
   for (let rowIdx = startIndex; rowIdx < rows.length; rowIdx++) {
     const row = rows[rowIdx];
     if (row.kind === "message") {
@@ -415,18 +436,20 @@ const CommittedTranscript = memo(function CommittedTranscript({
     rendered.push(renderMessage(userIdx));
     // A message split across segments keeps its navigation ref on the first one.
     const attached = new Set<number>();
+    const prepareTextSegment = (segment: Extract<(typeof segments)[number], { kind: "text" }>, segmentIdx: number) => {
+      const msg = messages[segment.index] as AssistantMessage;
+      const override = withAssistantBlocks(msg, segment.blocks, { omitUsage: !segment.last });
+      if (!segment.last) override.errorMessage = undefined;
+      const attachRef = !attached.has(segment.index);
+      attached.add(segment.index);
+      return (modelLabelLayout?: ModelLabelLayout) => renderMessage(segment.index, {
+        attachRef, keyPrefix: `text-${segmentIdx}`, messageOverride: override,
+        ...(segment.last ? {} : { showTimestamp: false }), modelLabelLayout,
+      });
+    };
     segments.forEach((segment, segmentIdx) => {
       if (segment.kind === "text") {
-        const msg = messages[segment.index] as AssistantMessage;
-        const override = withAssistantBlocks(msg, segment.blocks, { omitUsage: !segment.last });
-        if (!segment.last) override.errorMessage = undefined;
-        rendered.push(renderMessage(segment.index, {
-          attachRef: !attached.has(segment.index),
-          keyPrefix: `text-${segmentIdx}`,
-          messageOverride: override,
-          ...(segment.last ? {} : { showTimestamp: false }),
-        }));
-        attached.add(segment.index);
+        if (segments[segmentIdx - 1]?.kind !== "activity") rendered.push(prepareTextSegment(segment, segmentIdx)());
         return;
       }
       const refIdx = segment.pieces
@@ -434,12 +457,18 @@ const CommittedTranscript = memo(function CommittedTranscript({
         .map((piece) => visibleRefIndexByMessage.get(piece.index))
         .find((value): value is number => typeof value === "number");
       for (const piece of segment.pieces) attached.add(piece.index);
+      const next = segments[segmentIdx + 1];
+      const reply = next?.kind === "text" ? prepareTextSegment(next, segmentIdx + 1) : undefined;
+      const ownsTail = !next && rowIdx === rows.length - 1;
+      if (ownsTail) tailAttached = true;
       rendered.push(
         <div
           key={`activity-${userIdx}-${segmentIdx}`}
           ref={refIdx === undefined ? undefined : (el) => { messageRefs.current[refIdx] = el; }}
         >
-          <ProcessDetailsGroup messageCount={segment.stepCount} toolCallCount={segment.toolCallCount}>
+          <ProcessDetailsGroup messageCount={segment.stepCount} toolCallCount={segment.toolCallCount}
+            reply={reply ?? (ownsTail ? (layout) => <TranscriptTail modelLabelLayout={layout} /> : undefined)}
+          >
             {() => renderActivityPieces(messages, segment.pieces, renderMessage)}
           </ProcessDetailsGroup>
         </div>,
@@ -459,6 +488,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
         </button>
       )}
       {rendered}
+      {!tailAttached && <TranscriptTail />}
     </>
   );
 });
@@ -1304,6 +1334,21 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 </button>
               </div>
             )}
+            <TranscriptTailContext.Provider value={(layout) => streamState.streamingMessage ? (
+              <MessageView
+                key={streamState.streamingMessage.timestamp ?? "stream"}
+                message={streamState.streamingMessage as AgentMessage}
+                modelNames={modelNames}
+                cwd={messageCwd}
+                onOpenFile={onOpenFile}
+                toolResults={toolResultsWithLive}
+                toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+                expandThinkingByDefault={expandThinkingByDefault}
+                hideThinking={hideThinkingBlock}
+                liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
+                modelLabelLayout={layout}
+              />
+            ) : null}>
             <CommittedTranscript
               messages={messages}
               entryIds={entryIds}
@@ -1331,22 +1376,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
             />
-            {/* Also while held: a finished reply stays until its saved row
-                replaces it in the same render (useAgentSession-stream). */}
-            {streamState.streamingMessage && (
-              <MessageView
-                key={streamState.streamingMessage.timestamp ?? "stream"}
-                message={streamState.streamingMessage as AgentMessage}
-                modelNames={modelNames}
-                cwd={messageCwd}
-                onOpenFile={onOpenFile}
-                toolResults={toolResultsWithLive}
-                toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
-                expandThinkingByDefault={expandThinkingByDefault}
-                hideThinking={hideThinkingBlock}
-                liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
-              />
-            )}
+            </TranscriptTailContext.Provider>
 
             {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
               <div

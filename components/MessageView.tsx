@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useId, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps } from "react";
+import { memo, useState, useId, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps, type ReactNode } from "react";
 import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { AgentLinkContext, agentLinkIds } from "../lib/agent-links";
@@ -153,6 +153,8 @@ function loadThinkingContent(sessionId: string, entryId: string, blockIndex: num
 }
 
 interface Props {
+  /** Place the unchanged model row beside adjacent process details. */
+  modelLabelLayout?: (label: ReactNode) => ReactNode;
   message: AgentMessage;
   isStreaming?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
@@ -211,7 +213,7 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond, modelLabelLayout }: Props) {
   if (message.role === "custom" && isUserTurnMessage(message)) {
     const prompt: UserMessage = { role: "user", content: message.customType === "skill-prompt" ? getUserPromptText(message) ?? "/skill" : message.content, timestamp: message.timestamp };
     return <>
@@ -223,7 +225,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onEdit={onEdit} editing={editing} editDisabled={editDisabled} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} modelLabelLayout={modelLabelLayout} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -247,7 +249,8 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   }
   return null;
 }, (prev, next) => {
-  return prev.message === next.message
+  return prev.modelLabelLayout === next.modelLabelLayout
+    && prev.message === next.message
     && prev.isStreaming === next.isStreaming
     && haveSameRelevantToolResults(prev.message, prev.toolResults, next.toolResults)
     && prev.modelNames === next.modelNames
@@ -533,7 +536,9 @@ function AssistantMessageView({
   hideThinking,
   sourceBlockIndices,
   liveTokensPerSecond,
+  modelLabelLayout,
 }: {
+  modelLabelLayout?: (label: ReactNode) => ReactNode;
   message: AssistantMessage;
   isStreaming?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
@@ -657,62 +662,66 @@ function AssistantMessageView({
 
   if (blocks.length === 0 && !isStreaming && !errorMessage) return null;
 
+  const modelLabel = (
+    <div
+      style={{
+        fontSize: 11,
+        color: "var(--text-dim)",
+        marginBottom: modelLabelLayout ? 0 : 4,
+        flexWrap: modelLabelLayout ? "wrap" : undefined,
+        display: hasActivityBlocks ? "none" : "flex",
+        alignItems: "center",
+        gap: 6,
+      }}
+    >
+      {message.provider && (
+        <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
+      )}
+      {isStreaming && (() => {
+        let chars = 0;
+        for (const b of blocks) {
+          if (b.type === "text") chars += (b as TextContent).text?.length ?? 0;
+          else if (b.type === "thinking") chars += (b as ThinkingContent).thinking?.length ?? 0;
+        }
+        const est = Math.round(chars / 4);
+        return (
+          <>
+
+            {est > 0 && (
+              <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title={t("messageView.estimatedTokens")}>
+                <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
+                  </svg>
+                  {est}
+                </span>
+                {liveTokensPerSecond != null && (() => {
+                  // Speed tiers use the semantic status tokens as TEXT color
+                  // (theme-adaptive, AA-verified) over a subtle tint — the
+                  // old hardcoded palette failed AA for white-on-fill.
+                  const tier = liveTokensPerSecond >= 50 ? "success" : liveTokensPerSecond >= 30 ? "renamed" : liveTokensPerSecond >= 15 ? "warning" : "error";
+                  const tone = `var(--status-${tier})`;
+                  return (
+                    <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: `color-mix(in srgb, ${tone} 14%, var(--bg-panel))`, color: tone, fontSize: 11, fontWeight: 400 }}>
+                      {t("messageView.tokensPerSecond", { tps: liveTokensPerSecond.toFixed(1) })}
+                    </span>
+                  );
+                })()}
+              </span>
+            )}
+          </>
+        );
+      })()}
+    </div>
+  );
+
   return (
     <div
       className="chat-message"
       data-live={isStreaming ? "true" : undefined}
       style={{ marginBottom: 6 }}
     >
-      {/* Model label */}
-      <div
-        style={{
-          fontSize: 11,
-          color: "var(--text-dim)",
-          marginBottom: 4,
-          display: hasActivityBlocks ? "none" : "flex",
-          alignItems: "center",
-          gap: 6,
-        }}
-      >
-        {message.provider && (
-          <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
-        )}
-        {isStreaming && (() => {
-          let chars = 0;
-          for (const b of blocks) {
-            if (b.type === "text") chars += (b as TextContent).text?.length ?? 0;
-            else if (b.type === "thinking") chars += (b as ThinkingContent).thinking?.length ?? 0;
-          }
-          const est = Math.round(chars / 4);
-          return (
-            <>
-
-              {est > 0 && (
-                <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title={t("messageView.estimatedTokens")}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
-                    </svg>
-                    {est}
-                  </span>
-                  {liveTokensPerSecond != null && (() => {
-                    // Speed tiers use the semantic status tokens as TEXT color
-                    // (theme-adaptive, AA-verified) over a subtle tint — the
-                    // old hardcoded palette failed AA for white-on-fill.
-                    const tier = liveTokensPerSecond >= 50 ? "success" : liveTokensPerSecond >= 30 ? "renamed" : liveTokensPerSecond >= 15 ? "warning" : "error";
-                    const tone = `var(--status-${tier})`;
-                    return (
-                      <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: `color-mix(in srgb, ${tone} 14%, var(--bg-panel))`, color: tone, fontSize: 11, fontWeight: 400 }}>
-                        {t("messageView.tokensPerSecond", { tps: liveTokensPerSecond.toFixed(1) })}
-                      </span>
-                    );
-                  })()}
-                </span>
-              )}
-            </>
-          );
-        })()}
-      </div>
+      {modelLabelLayout ? modelLabelLayout(modelLabel) : modelLabel}
 
       <div ref={bodyRef} data-selection-scope="message" tabIndex={-1} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
         {blockItems.map(({ block, originalIndex }) => (
