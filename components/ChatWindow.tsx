@@ -5,7 +5,7 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { createContext, Fragment, memo, useContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
+import { ArrowDown, ChevronDown, ChevronUp, ChevronRight, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
@@ -195,8 +195,8 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply }: {
   if (toolCallCount > 0) parts.push(tn("chatWindow.toolCallCount", toolCallCount));
 
   return (
-    <div style={{ marginBottom: 4 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <div className="process-details-group" style={{ marginBottom: 4 }}>
+      <div className="process-details-header" style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <button
         type="button"
         aria-expanded={expanded}
@@ -205,30 +205,21 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply }: {
         style={{ minWidth: 0 }}
         title={expanded ? t("chatWindow.collapseProcessDetails") : t("chatWindow.expandProcessDetails")}
       >
-        <Layers
-          size={12}
-          strokeWidth={1.8}
-          aria-hidden="true"
-          style={{ flexShrink: 0, color: "var(--accent)" }}
-        />
-        <ChevronDown
-          size={12}
-          strokeWidth={1.8}
-          aria-hidden="true"
-          style={{
-            flexShrink: 0,
-            transform: expanded ? "rotate(180deg)" : "none",
-            transition: "transform var(--dur-fast) var(--ease-out-warm)",
-          }}
-        />
         <span className="process-details-label">
           {parts.join(" · ")}
         </span>
+        <ChevronRight
+          size={12}
+          strokeWidth={1.8}
+          aria-hidden="true"
+          style={{ flexShrink: 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}
+        />
       </button>
       <div ref={setModelSlot} style={{ minWidth: 0, overflowWrap: "anywhere" }} />
       </div>
+      <div className="process-details-divider" aria-hidden="true" />
       {expanded && (
-        <div style={{ marginTop: 3 }}>
+        <div className="process-details-content">
           {children()}
         </div>
       )}

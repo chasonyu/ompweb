@@ -9,6 +9,8 @@ html[data-theme="codex-light"], html.theme-codex-light {
   --border: color-mix(in oklab, #1a1c1f 8%, transparent);
   --border-strong: color-mix(in oklab, #1a1c1f 12%, transparent);
   --text: #1A1C1F;
+  --process-details-text: #8F8F8F;
+  --process-details-border: #0000001A;
   --text-muted: color-mix(in srgb, #1a1c1f 65%, transparent);
   --text-dim: color-mix(in oklab, #1a1c1f 50%, transparent);
   --accent: #2C67C5;
