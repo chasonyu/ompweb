@@ -3,7 +3,7 @@
 import { memo, useCallback, useRef, useState } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
-import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin } from "lucide-react";
+import { ChevronDown, ChevronRight, FolderClosed, GitBranch, MoreHorizontal, Pin } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
@@ -134,7 +134,7 @@ function ProjectRow({
     : tree;
 
   return (
-    <section className="sidebar-project" data-active={isActive ? "true" : "false"} style={{ marginBottom: 12 }}>
+    <section className="sidebar-project" data-active={isActive ? "true" : "false"} style={{ marginBottom: 0 }}>
       <ConfirmDialog
         open={confirmRemove}
         onOpenChange={setConfirmRemove}
@@ -195,9 +195,9 @@ function ProjectRow({
                 padding: "0 4px 0 10px",
               }}
             >
-              <Folder
-                size={15}
-                strokeWidth={1.8}
+              <FolderClosed
+                size={20}
+                strokeWidth={2}
                 style={{ flexShrink: 0, color: "var(--text-muted)" }}
                 aria-hidden="true"
               />
@@ -219,7 +219,7 @@ function ProjectRow({
                     setAliasEditing(false);
                   }
                 }}
-                style={{ flex: 1, minWidth: 0, height: 22, padding: "2px 6px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)", fontWeight: 600 }}
+                style={{ flex: 1, minWidth: 0, height: 22, padding: "2px 6px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 14, fontFamily: "inherit", fontWeight: 400 }}
               />
             </div>
           ) : (
@@ -254,9 +254,9 @@ function ProjectRow({
                 textAlign: "left",
               }}
             >
-              <Folder
-                size={15}
-                strokeWidth={1.8}
+              <FolderClosed
+                size={20}
+                strokeWidth={2}
                 style={{ flexShrink: 0, color: isActive ? "var(--accent)" : hovered ? "var(--text-muted)" : "var(--text-dim)", transition: "color var(--dur-fast) var(--ease-out-warm)" }}
                 aria-hidden="true"
               />
@@ -266,11 +266,11 @@ function ProjectRow({
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  letterSpacing: "-0.01em",
-                  lineHeight: 1.25,
+                  fontFamily: "inherit",
+                  fontSize: 14,
+                  fontWeight: 400,
+                  letterSpacing: "normal",
+                  lineHeight: "20px",
                 }}
               >
                 {label}
@@ -386,7 +386,7 @@ function ProjectRow({
       </div>
 
       {isExpanded && (
-        <div className="sidebar-project-sessions" style={{ margin: "2px 0 0" }}>
+        <div className="sidebar-project-sessions" style={{ padding: "1px 0 8px" }}>
           {visibleRoots.length === 0 ? (
             <div style={{ padding: "6px 12px 8px 34px", color: "var(--text-dim)", fontSize: 11 }}>
               {t("projects.emptyProject")}
@@ -741,7 +741,7 @@ const SessionItem = memo(function SessionItem({
         alignItems: "center",
         gap: 6,
         width: "100%",
-        margin: "1px 0",
+        margin: 0,
         padding: `0 8px 0 ${30 + depth * 14}px`,
         position: "relative",
         overflow: "hidden",
@@ -773,7 +773,7 @@ const SessionItem = memo(function SessionItem({
           {session.pinnedAt && <Pin size={12} aria-label={t("sessionSidebar.pinned")} style={{ flexShrink: 0, color: "var(--accent)" }} />}
           {depth > 0 && <GitBranch size={11} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />}
           <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
-            <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
+            <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 14, fontWeight: 400, lineHeight: "20px", letterSpacing: "normal" }}>
               {title}
             </span>
           </button>
