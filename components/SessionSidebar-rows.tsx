@@ -196,7 +196,7 @@ function ProjectRow({
               }}
             >
               <FolderClosed
-                size={20}
+                size={16}
                 strokeWidth={2}
                 style={{ flexShrink: 0, color: "var(--text-muted)" }}
                 aria-hidden="true"
@@ -255,7 +255,7 @@ function ProjectRow({
               }}
             >
               <FolderClosed
-                size={20}
+                size={16}
                 strokeWidth={2}
                 style={{ flexShrink: 0, color: isActive ? "var(--accent)" : hovered ? "var(--text-muted)" : "var(--text-dim)", transition: "color var(--dur-fast) var(--ease-out-warm)" }}
                 aria-hidden="true"
