@@ -153,6 +153,7 @@ function loadThinkingContent(sessionId: string, entryId: string, blockIndex: num
 }
 
 interface Props {
+  actionsAlwaysVisible?: boolean;
   /** Place the unchanged model row beside adjacent process details. */
   modelLabelLayout?: (label: ReactNode) => ReactNode;
   message: AgentMessage;
@@ -213,19 +214,19 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond, modelLabelLayout }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond, modelLabelLayout, actionsAlwaysVisible }: Props) {
   if (message.role === "custom" && isUserTurnMessage(message)) {
     const prompt: UserMessage = { role: "user", content: message.customType === "skill-prompt" ? getUserPromptText(message) ?? "/skill" : message.content, timestamp: message.timestamp };
     return <>
-      <UserMessageView message={prompt} cwd={cwd} onOpenFile={onOpenFile} />
+      <UserMessageView actionsAlwaysVisible={actionsAlwaysVisible} message={prompt} cwd={cwd} onOpenFile={onOpenFile} />
       {message.customType === "skill-prompt" && <SkillPromptContext message={message} cwd={cwd} onOpenFile={onOpenFile} />}
     </>;
   }
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onEdit={onEdit} editing={editing} editDisabled={editDisabled} />;
+    return <UserMessageView actionsAlwaysVisible={actionsAlwaysVisible} message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onEdit={onEdit} editing={editing} editDisabled={editDisabled} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} modelLabelLayout={modelLabelLayout} />;
+    return <AssistantMessageView actionsAlwaysVisible={actionsAlwaysVisible} message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} modelLabelLayout={modelLabelLayout} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -249,7 +250,8 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   }
   return null;
 }, (prev, next) => {
-  return prev.modelLabelLayout === next.modelLabelLayout
+  return prev.actionsAlwaysVisible === next.actionsAlwaysVisible
+    && prev.modelLabelLayout === next.modelLabelLayout
     && prev.message === next.message
     && prev.isStreaming === next.isStreaming
     && haveSameRelevantToolResults(prev.message, prev.toolResults, next.toolResults)
@@ -339,7 +341,8 @@ function SkillPromptContext({ message, cwd, onOpenFile }: { message: CustomMessa
   </details>;
 }
 
-function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, forkDisabled, onEdit, editing, editDisabled }: {
+function UserMessageView({ actionsAlwaysVisible, message, cwd, onOpenFile, entryId, onFork, forking, forkDisabled, onEdit, editing, editDisabled }: {
+  actionsAlwaysVisible?: boolean;
   message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
@@ -390,6 +393,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
 
   return (
     <div
+      className="message-action-scope"
+      data-actions-always-visible={actionsAlwaysVisible || undefined}
       style={{ marginBottom: 18, display: "flex", flexDirection: "column", alignItems: "flex-end", paddingRight: 6 }}
     >
       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "85%", minWidth: 0 }}>
@@ -455,7 +460,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
 
         {/* Bottom row: action buttons + timestamp — inside the bubble's column,
             spanning its width, so the timestamp aligns with its right edge. */}
-          <div style={{
+          <div className="message-actions" style={{
             display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end",
             gap: 6, marginTop: 3, width: "100%",
           }}>
@@ -516,6 +521,7 @@ export function isInterruptedMessage(errorMessage?: string | null, stopReason?: 
 }
 
 function AssistantMessageView({
+  actionsAlwaysVisible,
   message,
   isStreaming,
   toolResults,
@@ -538,6 +544,7 @@ function AssistantMessageView({
   liveTokensPerSecond,
   modelLabelLayout,
 }: {
+  actionsAlwaysVisible?: boolean;
   modelLabelLayout?: (label: ReactNode) => ReactNode;
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -717,7 +724,8 @@ function AssistantMessageView({
 
   return (
     <div
-      className="chat-message"
+      className="chat-message message-action-scope"
+      data-actions-always-visible={actionsAlwaysVisible || undefined}
       data-live={isStreaming ? "true" : undefined}
       style={{ marginBottom: 6 }}
     >
@@ -787,7 +795,7 @@ function AssistantMessageView({
       </div>
 
       {!isStreaming && (texts.some((text) => text.trim()) || time || canFork || (ttsSupported && speakableText.trim().length > 0)) && (
-        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
+        <div className="message-actions" data-actions-active={isThisSpeaking || forking || undefined} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
             <MessageCopyActions texts={texts} bodyRef={bodyRef} />
             {ttsSupported && speakableText.trim().length > 0 && (

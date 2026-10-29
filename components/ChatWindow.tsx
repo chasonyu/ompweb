@@ -237,7 +237,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply }: {
   );
 }
 
-type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout }) => ReactNode;
+type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout; actionsAlwaysVisible?: boolean }) => ReactNode;
 
 /** Render a folded activity run exactly as it streamed: one entry per piece, never merged across messages. */
 export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityPiece[], renderMessage: RenderMessage): ReactNode[] {
@@ -249,9 +249,19 @@ export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityP
       keyPrefix: `activity-${pieceIdx}`,
       messageOverride: { ...withAssistantBlocks(msg, piece.blocks, { omitUsage: true }), errorMessage: undefined },
       showTimestamp: false,
+      actionsAlwaysVisible: false,
       sourceBlockIndices: piece.blocks.map((block) => msg.content.indexOf(block)),
     });
   });
+}
+
+// Tool activity alone does not replace the last visible conversation message.
+function hasConversationBody(message?: AgentMessage | null): boolean {
+  if (!message) return false;
+  if (isUserTurnMessage(message)) return true;
+  return message.role === "assistant" && (!!message.errorMessage?.trim() || (message.content ?? []).some(
+    (block) => block.type === "image" || (block.type === "text" && !!block.text.trim()),
+  ));
 }
 
 type ModelLabelLayout = (label: ReactNode) => ReactNode;
@@ -270,6 +280,7 @@ interface CommittedTranscriptProps {
   conversationMeta: { toolResultsMap: Map<string, ToolResultMessage>; lastAnchorIdx: number; visibleRefIndexByMessage: Map<number, number> };
   messageRefs: React.RefObject<(HTMLDivElement | null)[]>;
   isStreaming: boolean;
+  hasStreamingReply?: boolean;
   sessionBusy: boolean;
   isCompacting: boolean;
   /** A run started outside this UI looks active from the transcript tail (see
@@ -308,7 +319,7 @@ interface CommittedTranscriptProps {
  * grouping/splitting work at display-frame cadence.
  */
 export const CommittedTranscript = memo(function CommittedTranscript({
-  messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
+  messages, entryIds, conversationMeta, messageRefs, isStreaming, hasStreamingReply = false, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
@@ -316,12 +327,13 @@ export const CommittedTranscript = memo(function CommittedTranscript({
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
   // omp's `branch` command accepts a user entry only; see lib/chat-fork.ts.
   const forkTargets = useMemo(() => resolveForkTargets(messages, entryIds), [messages, entryIds]);
+  const lastConversationIndex = useMemo(() => messages.findLastIndex(hasConversationBody), [messages]);
 
   const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
     messageRefs.current[refIndex] = el;
   };
 
-  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout } = {}): ReactNode => {
+  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout; actionsAlwaysVisible?: boolean } = {}): ReactNode => {
     const msg = options.messageOverride ?? messages[idx];
     const isVisible = isUserTurnMessage(msg) || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
@@ -369,6 +381,7 @@ export const CommittedTranscript = memo(function CommittedTranscript({
         hideThinking={hideThinkingBlock}
         sourceBlockIndices={options.sourceBlockIndices}
         modelLabelLayout={options.modelLabelLayout}
+        actionsAlwaysVisible={!hasStreamingReply && idx === lastConversationIndex && (options.actionsAlwaysVisible ?? true)}
       />
     );
     if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
@@ -436,6 +449,7 @@ export const CommittedTranscript = memo(function CommittedTranscript({
     rendered.push(renderMessage(userIdx));
     // A message split across segments keeps its navigation ref on the first one.
     const attached = new Set<number>();
+    const lastTextSegmentIndex = segments.findLastIndex((part) => part.kind === "text");
     const prepareTextSegment = (segment: Extract<(typeof segments)[number], { kind: "text" }>, segmentIdx: number) => {
       const msg = messages[segment.index] as AssistantMessage;
       const override = withAssistantBlocks(msg, segment.blocks, { omitUsage: !segment.last });
@@ -444,6 +458,7 @@ export const CommittedTranscript = memo(function CommittedTranscript({
       attached.add(segment.index);
       return (modelLabelLayout?: ModelLabelLayout) => renderMessage(segment.index, {
         attachRef, keyPrefix: `text-${segmentIdx}`, messageOverride: override,
+        actionsAlwaysVisible: segmentIdx === lastTextSegmentIndex,
         ...(segment.last ? {} : { showTimestamp: false }), modelLabelLayout,
       });
     };
@@ -1347,10 +1362,12 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 hideThinking={hideThinkingBlock}
                 liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
                 modelLabelLayout={layout}
+                actionsAlwaysVisible
               />
             ) : null}>
             <CommittedTranscript
               messages={messages}
+              hasStreamingReply={hasConversationBody(streamState.streamingMessage as AgentMessage | null)}
               entryIds={entryIds}
               conversationMeta={conversationMetaWithLive}
               messageRefs={messageRefs}

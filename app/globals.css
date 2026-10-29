@@ -4861,3 +4861,17 @@ html[data-touch-targets="accessible"] .extension-dialog-footer > button {
 @media (prefers-reduced-motion: reduce) { .mcp-spin { animation: none; } .mcp-management * { transition: none !important; } }
 
 .settings-card.mcp-source-card, .settings-card.mcp-other-configs, .settings-card.mcp-editor-card { display: block; padding: 0; margin-bottom: 0; }
+
+/* Keep the footer's layout and keyboard access while quieting older messages.
+   Touch devices have no hover, so their actions stay visible. */
+@media (hover: hover) and (pointer: fine) {
+  .message-action-scope > .message-actions,
+  .message-action-scope > div > .message-actions {
+    transition: opacity var(--dur-fast) var(--ease-out-warm);
+  }
+  .message-action-scope:not([data-actions-always-visible]):not(:hover):not(:focus-within) > .message-actions:not([data-actions-active]),
+  .message-action-scope:not([data-actions-always-visible]):not(:hover):not(:focus-within) > div > .message-actions {
+    opacity: 0;
+    pointer-events: none;
+  }
+}

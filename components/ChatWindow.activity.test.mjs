@@ -227,3 +227,38 @@ test("a custom advisor tail cannot remove preceding process details", () => {
   assert.equal(button.getAttribute("aria-expanded"), "true");
   assert.ok(view.getByText("Consider the edge case."));
 });
+
+function persistentActions(container) {
+  return [...container.querySelectorAll('[data-actions-always-visible="true"]')];
+}
+
+test("only the last conversational message keeps actions visible, including a last user prompt", () => {
+  const messages = [{ role: "user", content: "first user" }, assistant([text("first answer")]), { role: "user", content: "last user" }];
+  const view = render(transcript(transcriptProps(messages)));
+  assert.equal(persistentActions(view.container).length, 1);
+  assert.ok(persistentActions(view.container)[0].textContent.includes("last user"));
+  view.rerender(transcript(transcriptProps([...messages, assistant([text("last answer")])])));
+  assert.equal(persistentActions(view.container).length, 1);
+  assert.ok(persistentActions(view.container)[0].textContent.includes("last answer"));
+});
+
+test("split replies mark only the last text segment; trailing tool results do not take its place", () => {
+  const messages = [{ role: "user", content: "go" }, assistant([text("first part"), call("a"), text("last part"), call("b")]), { role: "toolResult", toolCallId: "b", content: [text("result")] }];
+  const view = render(transcript(transcriptProps(messages)));
+  assert.equal(persistentActions(view.container).length, 1);
+  assert.ok(persistentActions(view.container)[0].textContent.includes("last part"));
+  for (const button of view.container.querySelectorAll('.process-details-toggle')) fireEvent.click(button);
+  assert.equal(persistentActions(view.container).length, 1);
+});
+
+test("streaming reply takes persistent actions from history, returning on commit", () => {
+  const messages = [{ role: "user", content: "go" }, assistant([text("saved answer")])];
+  const props = transcriptProps(messages);
+  const view = render(transcript(props));
+  assert.equal(persistentActions(view.container).length, 1);
+  view.rerender(transcript({ ...props, hasStreamingReply: true }));
+  assert.equal(persistentActions(view.container).length, 0);
+  view.rerender(transcript(transcriptProps([...messages, assistant([text("committed answer")])])));
+  assert.equal(persistentActions(view.container).length, 1);
+  assert.ok(persistentActions(view.container)[0].textContent.includes("committed answer"));
+});
