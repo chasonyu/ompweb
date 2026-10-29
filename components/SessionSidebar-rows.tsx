@@ -174,7 +174,7 @@ function ProjectRow({
           padding: "0 6px 0 0",
           borderRadius: "var(--radius-control)",
           background: isActive
-            ? (hovered ? "var(--bg-hover)" : "var(--bg-subtle)")
+            ? (hovered ? "var(--bg-hover)" : "var(--sidebar-project-selected-bg, var(--bg-subtle))")
             : (hovered ? "var(--bg-hover)" : "transparent"),
           transition: SIDEBAR_BUTTON_TRANSITION,
           ...(isDragTarget ? { outline: "1px solid var(--accent)", outlineOffset: -1 } : {}),
@@ -249,7 +249,7 @@ function ProjectRow({
                 gap: 7,
                 padding: "0 4px 0 10px",
                 background: "none", border: "none",
-                color: isActive ? "var(--text)" : hovered ? "var(--text)" : "var(--text-muted)",
+                color: isActive ? "var(--text)" : hovered ? "var(--text)" : "var(--sidebar-project-text, var(--text-muted))",
                 cursor: "pointer",
                 textAlign: "left",
               }}
@@ -642,7 +642,7 @@ const SessionItem = memo(function SessionItem({
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   const relativeTime = formatRelativeTime(session.modified, locale, relativeTimeNow);
   const rowBackground = isSelected
-    ? "color-mix(in srgb, var(--bg-selected) 70%, transparent)"
+    ? "var(--sidebar-session-selected-bg, color-mix(in srgb, var(--bg-selected) 70%, transparent))"
     : hovered ? "var(--bg-hover)" : "transparent";
 
   const startRename = useCallback((event: React.MouseEvent) => {
@@ -742,7 +742,7 @@ const SessionItem = memo(function SessionItem({
         gap: 6,
         width: "100%",
         margin: 0,
-        padding: `0 8px 0 ${30 + depth * 14}px`,
+        padding: `0 8px 0 ${33 + depth * 14}px`,
         position: "relative",
         overflow: "hidden",
         background: rowBackground,
@@ -770,7 +770,7 @@ const SessionItem = memo(function SessionItem({
         <input ref={inputRef} autoFocus aria-label={t("sessionSidebar.rename")} value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") void commitRename(); if (event.key === "Escape") { event.preventDefault(); renameCancelRef.current = true; setRenaming(false); } }} style={{ flex: 1, height: 25, padding: "3px 7px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }} />
       ) : (
         <>
-          {session.pinnedAt && <Pin size={12} aria-label={t("sessionSidebar.pinned")} style={{ flexShrink: 0, color: "var(--accent)" }} />}
+          {session.pinnedAt && <Pin size={12} aria-label={t("sessionSidebar.pinned")} style={{ position: "absolute", left: 6 + depth * 14, flexShrink: 0, color: "var(--accent)" }} />}
           {depth > 0 && <GitBranch size={11} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />}
           <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
             <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 14, fontWeight: 400, lineHeight: "20px", letterSpacing: "normal" }}>

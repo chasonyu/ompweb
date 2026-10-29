@@ -48,3 +48,16 @@ html.theme-codex-light ::selection {
   background: #539AF859;
   color: var(--text);
 }
+
+/* Sidebar colors stay local so the conversation and other themes keep their palette. */
+html[data-theme="codex-light"] .sidebar-container,
+html.theme-codex-light .sidebar-container {
+  --bg-panel: #FBFBFB;
+  --text: #282828;
+  --text-muted: #8F8F8F;
+  --text-dim: #8F8F8F;
+  --bg-hover: #0000000D;
+  --sidebar-project-text: var(--text);
+  --sidebar-project-selected-bg: var(--bg-hover);
+  --sidebar-session-selected-bg: var(--bg-hover);
+}
