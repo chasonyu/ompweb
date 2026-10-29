@@ -409,7 +409,6 @@ function UserMessageView({ actionsAlwaysVisible, message, cwd, onOpenFile, entry
             minWidth: 0,
             background: "var(--user-bg)",
             border: "none",
-            borderLeft: "3px solid var(--accent)",
             borderRadius: "var(--radius-card)",
             boxShadow: "none",
             padding: "8px 12px",
