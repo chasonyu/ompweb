@@ -2915,7 +2915,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             gap: 2,
             marginTop: 8,
             paddingTop: 8,
-            borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
+            borderTop: "1px solid transparent",
             flexWrap: "wrap",
             rowGap: 6,
           }}>
