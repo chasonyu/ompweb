@@ -262,3 +262,43 @@ test("streaming reply takes persistent actions from history, returning on commit
   assert.equal(persistentActions(view.container).length, 1);
   assert.ok(persistentActions(view.container)[0].textContent.includes("committed answer"));
 });
+
+test("live status moves to the latest process header and clears without remounting", () => {
+ const messages=[{role:'user',content:'go'}];
+ const props={...transcriptProps(messages),liveStatus:'Waiting for model...'};
+ const view=render(transcript(props));
+ assert.equal(view.container.querySelectorAll('.transcript-live-status').length,1);
+ assert.equal(view.container.querySelector('.transcript-live-status').closest('.process-details-header'),null);
+ const next={...transcriptProps([...messages,assistant([call('a')])]),liveStatus:props.liveStatus};
+ view.rerender(transcript(next));
+ const header=view.container.querySelector('.process-details-header');
+ assert.equal(header.querySelector('.transcript-live-status').textContent,props.liveStatus);
+ assert.equal(view.container.querySelectorAll('.transcript-live-status').length,1);
+ const toggle=header.querySelector('button');fireEvent.click(toggle);
+ view.rerender(transcript({...next,liveStatus:'Compacting context...'}));
+ assert.equal(toggle.getAttribute('aria-expanded'),'true');
+ view.rerender(transcript({...next,liveStatus:null}));
+ assert.equal(view.container.querySelectorAll('.transcript-live-status').length,0);
+ assert.equal(toggle.getAttribute('aria-expanded'),'true');
+});
+
+test("live status belongs only to newest activity after the model label", () => {
+ const messages=[{role:'user',content:'go'},assistant([call('a'),text('first'),call('b'),text('last')])];
+ const view=render(transcript({...transcriptProps(messages),liveStatus:'Waiting for model...'}));
+ const headers=view.container.querySelectorAll('.process-details-header');
+ assert.equal(headers.length,2);assert.equal(headers[0].querySelector('.transcript-live-status'),null);
+ assert.equal(headers[1].lastElementChild.textContent,'Waiting for model...');
+ assert.ok(headers[1].textContent.indexOf('Original model')<headers[1].textContent.indexOf('Waiting for model...'));
+});
+
+test("new user and flat live tail never attach status to historical activity", () => {
+ const old=[{role:'user',content:'old'},assistant([call('a'),text('done')])];
+ for(const flat of [false,true]){
+  const messages=[...old,{role:'user',content:'new'},...(flat?[assistant([call('b')])]:[])];
+  const props={...transcriptProps(messages),sessionBusy:true,hideToolActivity:!flat,liveStatus:'Thinking...'};props.conversationMeta.lastAnchorIdx=2;
+  const view=render(transcript(props));
+  assert.equal(view.container.querySelectorAll('.transcript-live-status').length,1);
+  assert.equal(view.container.querySelector('.transcript-live-status').closest('.process-details-header'),null);
+  view.unmount();
+ }
+});

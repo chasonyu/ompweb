@@ -4889,3 +4889,15 @@ html[data-touch-targets="accessible"] .extension-dialog-footer > button {
     pointer-events: none;
   }
 }
+
+/* Keep live status beside the current process summary, with a standalone
+   fallback before the first process group exists. */
+.transcript-live-status {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--process-details-text, var(--text-muted));
+  font-size: var(--chat-font-size);
+  line-height: 1.5;
+}
+.process-details-model-slot:empty { display: none; }

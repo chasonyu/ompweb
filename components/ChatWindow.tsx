@@ -185,7 +185,12 @@ export function OmpRuntimeVersion() {
   );
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply }: { messageCount: number; toolCallCount: number; children: () => ReactNode; reply?: (layout: ModelLabelLayout) => ReactNode }) {
+function TranscriptLiveStatus({ text }: { text?: string | null }) {
+  if (!text) return null;
+  return <span className="transcript-live-status" role="status" aria-live="polite">{text}</span>;
+}
+
+function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply, liveStatus }: { messageCount: number; toolCallCount: number; liveStatus?: string | null; children: () => ReactNode; reply?: (layout: ModelLabelLayout) => ReactNode }) {
   const { t, tn } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [modelSlot, setModelSlot] = useState<HTMLDivElement | null>(null);
@@ -196,7 +201,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply }: {
 
   return (
     <div className="process-details-group" style={{ marginBottom: 4 }}>
-      <div className="process-details-header" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div className="process-details-header" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: 12, rowGap: 4 }}>
       <button
         type="button"
         aria-expanded={expanded}
@@ -215,7 +220,8 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply }: {
           style={{ flexShrink: 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}
         />
       </button>
-      <div ref={setModelSlot} style={{ minWidth: 0, overflowWrap: "anywhere" }} />
+      <div ref={setModelSlot} className="process-details-model-slot" style={{ minWidth: 0, overflowWrap: "anywhere" }} />
+      <TranscriptLiveStatus text={liveStatus} />
       </div>
       <div className="process-details-divider" aria-hidden="true" />
       {expanded && (
@@ -266,6 +272,7 @@ function TranscriptTail({ modelLabelLayout }: { modelLabelLayout?: ModelLabelLay
 }
 
 interface CommittedTranscriptProps {
+  liveStatus?: string | null;
   messages: AgentMessage[];
   entryIds: string[];
   conversationMeta: { toolResultsMap: Map<string, ToolResultMessage>; lastAnchorIdx: number; visibleRefIndexByMessage: Map<number, number> };
@@ -310,7 +317,7 @@ interface CommittedTranscriptProps {
  * grouping/splitting work at display-frame cadence.
  */
 export const CommittedTranscript = memo(function CommittedTranscript({
-  messages, entryIds, conversationMeta, messageRefs, isStreaming, hasStreamingReply = false, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
+  messages, entryIds, conversationMeta, messageRefs, isStreaming, liveStatus, hasStreamingReply = false, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
@@ -420,10 +427,15 @@ export const CommittedTranscript = memo(function CommittedTranscript({
 
   const rendered: ReactNode[] = [];
   let tailAttached = false;
+  let statusAttached = false;
   for (let rowIdx = startIndex; rowIdx < rows.length; rowIdx++) {
     const row = rows[rowIdx];
     if (row.kind === "message") {
       rendered.push(renderMessage(row.index));
+      if (row.index === lastAnchorIdx) {
+        rendered.push(<TranscriptLiveStatus key="live-status" text={liveStatus} />);
+        statusAttached = true;
+      }
       continue;
     }
     const { userIndex: userIdx, endIndex: endIdx, segments } = row;
@@ -433,11 +445,22 @@ export const CommittedTranscript = memo(function CommittedTranscript({
       // progress stay in view; it folds once the run ends.
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
         rendered.push(renderMessage(renderIdx));
+        if (renderIdx === lastAnchorIdx) {
+          rendered.push(<TranscriptLiveStatus key="live-status" text={liveStatus} />);
+          statusAttached = true;
+        }
       }
       continue;
     }
 
     rendered.push(renderMessage(userIdx));
+    // Only the current turn owns live status; old process groups stay historical.
+    const statusSegmentIndex = userIdx === lastAnchorIdx
+      ? segments.findLastIndex((part) => part.kind === "activity") : -1;
+    if (userIdx === lastAnchorIdx) {
+      statusAttached = true;
+      if (statusSegmentIndex < 0) rendered.push(<TranscriptLiveStatus key="live-status" text={liveStatus} />);
+    }
     // A message split across segments keeps its navigation ref on the first one.
     const attached = new Set<number>();
     const lastTextSegmentIndex = segments.findLastIndex((part) => part.kind === "text");
@@ -473,6 +496,7 @@ export const CommittedTranscript = memo(function CommittedTranscript({
           ref={refIdx === undefined ? undefined : (el) => { messageRefs.current[refIdx] = el; }}
         >
           <ProcessDetailsGroup messageCount={segment.stepCount} toolCallCount={segment.toolCallCount}
+            liveStatus={segmentIdx === statusSegmentIndex ? liveStatus : null}
             reply={reply ?? (ownsTail ? (layout) => <TranscriptTail modelLabelLayout={layout} /> : undefined)}
           >
             {() => renderActivityPieces(messages, segment.pieces, renderMessage)}
@@ -494,6 +518,7 @@ export const CommittedTranscript = memo(function CommittedTranscript({
         </button>
       )}
       {rendered}
+      {!statusAttached && <TranscriptLiveStatus text={liveStatus} />}
       {!tailAttached && <TranscriptTail />}
     </>
   );
@@ -1077,12 +1102,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     const active = document.activeElement;
     if (askOpen && active instanceof HTMLElement && hiddenComposerRef.current?.contains(active)) active.blur();
   }, [askOpen]);
-  // The live status is merged into a ComposerPanels header row (#245)
-  // whenever one exists (todo or subagent row); only then is the
-  // standalone ChatInput status bar suppressed. With no host row, or in
-  // the minimized pill bar (which keeps composerStatusText below), the
-  // bar stays so the status is never hidden.
-  const hasStatusHostRow = todoPhases.length > 0 || subagents.length > 0;
   const chatInputElement = (
     <ChatInput
       draftIdentityMove={composerIdentityMove}
@@ -1151,7 +1170,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
          accept Escape-to-minimize in the fresh-chat branch where there is
          nothing to collapse. */
       onMinimize={isEmptyNew ? undefined : handleMinimize}
-      statusText={hasStatusHostRow ? null : composerStatusText}
       onOpenProviders={onOpenProviders}
     />
   );
@@ -1357,6 +1375,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               />
             ) : null}>
             <CommittedTranscript
+              liveStatus={composerStatusText}
               messages={messages}
               hasStreamingReply={hasConversationBody(streamState.streamingMessage as AgentMessage | null)}
               entryIds={entryIds}
@@ -1451,7 +1470,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
           draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
           isStreaming={sessionBusy}
           isCompacting={isCompacting}
-          statusText={composerStatusText}
           expandRef={minimizedExpandRef}
           onExpand={handleExpand}
           onAbort={handleAbort}
@@ -1512,7 +1530,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               subagents={subagents}
               onSelectSubagent={setSelectedSubagent}
               btw={btwPanel}
-              liveStatus={composerStatusText}
             />
             <ExtensionWidgets widgets={belowEditorWidgets} />
           </div>
