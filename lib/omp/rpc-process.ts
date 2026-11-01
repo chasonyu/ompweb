@@ -288,9 +288,12 @@ export class RpcProcess {
   }
 
   /** Fire-and-forget frame write (extension_ui_response, host_tool_result). */
-  sendFrame(frame: { type: string; [key: string]: unknown }): void {
-    if (this.exited) return;
-    this.writeFrame(frame, () => {});
+  sendFrame(frame: { type: string; [key: string]: unknown }, callback: (error?: Error | null) => void = () => {}): void {
+    if (this.exited) {
+      callback(new Error("RPC process is not running"));
+      return;
+    }
+    this.writeFrame(frame, callback);
   }
 
   private writeFrame(frame: RpcFrame, callback: (error?: Error | null) => void): void {

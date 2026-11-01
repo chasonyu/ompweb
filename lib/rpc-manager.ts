@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+import { isAbsolute, join } from "node:path";
 import { isUserTurnMessage } from "./user-turn";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync } from "fs";
@@ -48,6 +50,51 @@ import type {
 } from "./pi-types";
 import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem, ProjectLaunchConfig } from "./types";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
+
+interface AgentBellAdapter {
+  frame(sessionId: string, frame: Record<string, unknown>, notifications: readonly { type: string }[]): void;
+  alias(oldId: string, newId: string): void;
+  uncertain(): void;
+  resolve(sessionId: string, id: string, resolution: "cancelled" | "expired"): void;
+  respond(sessionId: string, id: string, response: Record<string, unknown>): void;
+  discard(sessionId: string): void;
+}
+interface AgentBellRuntime { client: { markGap(): void }; stop(): Promise<void> }
+const bellGlobal = globalThis as typeof globalThis & {
+  __ompAgentBell?: { adapter: AgentBellAdapter; runtime: AgentBellRuntime };
+  __ompAgentBellFailure?: { configKey: string; retryAt: number };
+};
+/** The private token is read in-process; only paths enter the child environment. */
+function agentBell(action: (adapter: AgentBellAdapter) => void): void {
+  const configKey = JSON.stringify([process.env.AGENT_BELL_MODULE_DIR, process.env.AGENT_BELL_BRIDGE_CONFIG]);
+  const failure = bellGlobal.__ompAgentBellFailure;
+  const throttled = failure?.configKey === configKey && Date.now() < failure.retryAt;
+  if (!bellGlobal.__ompAgentBell && throttled) return;
+  try {
+    if (!bellGlobal.__ompAgentBell) {
+      const dir = process.env.AGENT_BELL_MODULE_DIR;
+      const config = process.env.AGENT_BELL_BRIDGE_CONFIG;
+      if (!dir && !config) return;
+      if (!dir || !config || !isAbsolute(dir) || !isAbsolute(config)) throw new Error();
+      const load = createRequire(join(dir, "entry.js"));
+      const runtime = load(join(dir, "bridge/config.js")).createBridgeRuntime(config, "ompweb");
+      try {
+        const Adapter = load(join(dir, "adapters/ompweb.js")).OmpWebAdapter;
+        // Failed initialization may have dropped the start of a run. Publish the
+        // gap before making a recovered runtime available to any frame.
+        if (failure) runtime.client.markGap();
+        bellGlobal.__ompAgentBell = { runtime, adapter: new Adapter(runtime.outbox, () => runtime.client.markGap()) };
+      } catch (error) { void runtime.stop().catch(() => {}); throw error; }
+    }
+    action(bellGlobal.__ompAgentBell.adapter);
+  } catch {
+    if (!throttled) {
+      bellGlobal.__ompAgentBellFailure = { configKey, retryAt: Date.now() + 30_000 };
+      console.error("agent-bell: bridge_error");
+      try { bellGlobal.__ompAgentBell?.runtime.client.markGap(); } catch { /* Disk failure must not interrupt RPC. */ }
+    }
+  }
+}
 
 // ============================================================================
 // Types
@@ -501,7 +548,7 @@ export class AgentSessionWrapper {
    */
   private reapIfDisconnected(): void {
     if (!this.isAlive() || this.hasSubscribers() || this.isRunning()
-      || this.handshaking || this.pendingCommands > 0) {
+      || this.unsettled || this.handshaking || this.pendingCommands > 0) {
       // A paused human dialog produces no frames. Do not spin a zero-delay
       // timer once the old deadline has passed while protected work remains.
       this.reapDeadline = Math.max(this.reapDeadline, Date.now() + this.disconnectDestroyMs);
@@ -604,6 +651,8 @@ export class AgentSessionWrapper {
     // live stream and run state must survive; only the id changes.
     const moved = identityChanged && this.sessionMovePending;
     if (identityChanged && !moved) {
+      agentBell((bell) => bell.discard(oldId));
+      this.unsettled = false;
       this.resetStream();
       this.promptRunning = false;
       this.awaitingAgentStart = false;
@@ -624,6 +673,7 @@ export class AgentSessionWrapper {
       if (oldId !== this._sessionId) {
         // Tabs still showing the old id are still viewing this conversation.
         this.movedFromIds.push(oldId);
+        agentBell((bell) => bell.alias(oldId, this._sessionId));
         // Keep the old id routable: other tabs still address it, and a fresh
         // `--resume` of the old file would fork again (its owner lives on).
         this.onIdentityChangeCallback?.(oldId, this._sessionId, { keepOldId: true });
@@ -768,8 +818,10 @@ export class AgentSessionWrapper {
     if (this.streaming || this.promptRunning) this.emit({ type: "agent_end", isTerminal: true, messages: [] });
     if (this.streaming || this.promptRunning || this.unsettled) {
       this.publishNotifications({ type: "process_exit", detail: detail || status });
+    } else {
+      agentBell((bell) => bell.frame(this._sessionId, { type: "process_exit" }, []));
     }
-    this.destroy();
+    this.destroy("process-exit");
   }
 
   private publishNotifications(frame: Record<string, unknown>): void {
@@ -777,7 +829,9 @@ export class AgentSessionWrapper {
       sessionId: this._sessionId,
       sessionName: this._sessionName || this.cwd.split(/[\\/]/).filter(Boolean).pop() || null,
     };
-    for (const notification of this.detectNotification(frame, session)) {
+    const notifications = this.detectNotification(frame, session);
+    agentBell((bell) => bell.frame(this._sessionId, frame, notifications));
+    for (const notification of notifications) {
       publishNotification(this.movedFromIds.length ? { ...notification, aliases: this.movedFromIds } : notification);
     }
   }
@@ -1031,7 +1085,8 @@ export class AgentSessionWrapper {
     }
   }
 
-  private clearPendingUiRequests(): void {
+  private clearPendingUiRequests(preserveAttention = false): void {
+    if (!preserveAttention) agentBell((bell) => bell.discard(this._sessionId));
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
     this.pendingUiRequests.clear();
@@ -1041,6 +1096,7 @@ export class AgentSessionWrapper {
     const method = event.method as string;
     const id = event.id as string;
     if (method === "cancel") {
+      agentBell((bell) => bell.resolve(this._sessionId, event.targetId as string, "cancelled"));
       this.forgetPendingUiRequest(event.targetId as string);
       return false;
     }
@@ -1064,7 +1120,10 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+        const timer = setTimeout(() => {
+          agentBell((bell) => bell.resolve(this._sessionId, id, "expired"));
+          this.forgetPendingUiRequest(id);
+        }, timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
@@ -1278,7 +1337,7 @@ export class AgentSessionWrapper {
     this.lastIdleReset = now;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (this.isRunning() || this.handshaking || this.pendingCommands > 0) {
+      if (this.isRunning() || this.unsettled || this.handshaking || this.pendingCommands > 0) {
         this.resetIdleTimer(true);
         return;
       }
@@ -1297,6 +1356,7 @@ export class AgentSessionWrapper {
     for (const [id, event] of this.pendingUiRequests) {
       const expiresAt = event.expiresAt as number | undefined;
       if (expiresAt !== undefined && expiresAt <= now) {
+        agentBell((bell) => bell.resolve(this._sessionId, id, "expired"));
         this.forgetPendingUiRequest(id);
         continue;
       }
@@ -1724,6 +1784,7 @@ export class AgentSessionWrapper {
       this.extensionStatuses.clear();
       this.extensionWidgets.clear();
       this.clearPendingUiRequests();
+      this.unsettled = false;
       this.promptRunning = false;
       this.promptDispatchPendingCount = 0;
       this.awaitingAgentStart = false;
@@ -2078,8 +2139,16 @@ export class AgentSessionWrapper {
           throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
         }
         const wasPending = this.pendingUiRequests.has(id);
+        try {
+          await new Promise<void>((resolve, reject) => {
+            this.proc.sendFrame({ type: "extension_ui_response", id, ...rest }, (error) => error ? reject(error) : resolve());
+          });
+        } catch (error) {
+          agentBell((bell) => bell.uncertain());
+          throw error;
+        }
+        agentBell((bell) => bell.respond(this._sessionId, id, rest));
         this.forgetPendingUiRequest(id);
-        this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
         // omp sends no cancel for an answered dialog; other tabs on this
         // session would keep showing it, so settle it for them here.
         if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
@@ -2218,7 +2287,7 @@ export class AgentSessionWrapper {
       this.sessionFileSignalTimer = null;
     }
     this.unsubscribeFrames?.();
-    this.clearPendingUiRequests();
+    this.clearPendingUiRequests(reason === "process-exit");
     this.promptDispatchPendingCount = 0;
     this.awaitingAgentStart = false;
     this.awaitingAgentStartDeadline = 0;
