@@ -252,7 +252,6 @@ export interface ChatInputHandle {
   /** Retarget captured queue recoveries before a confirmed move can render. */
   retargetPendingRecovery: (from: string, to: string) => void;
 }
-const COMPOSITION_END_ENTER_GRACE_MS = 100;
 
 // The history / slash / @ menus are absolutely positioned relative to the
 // composer input. On the empty-session page the composer sits inside an
@@ -458,7 +457,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const atMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
-  const lastCompositionEndAtRef = useRef(0);
   const slashCommandsRequestedRef = useRef(false);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const atItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -1613,14 +1611,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
       const nativeEvent = e.nativeEvent;
-      const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
+      // IME confirmation can arrive after compositionend with isComposing=false;
+      // keyCode 229 still identifies it without swallowing the next intentional Enter.
       const isComposing =
         isComposingRef.current ||
         nativeEvent.isComposing ||
         nativeEvent.keyCode === 229;
 
-      if (e.key === "Enter" && !e.shiftKey && (isComposing || recentlyComposed)) {
-        if (recentlyComposed) e.preventDefault();
+      if (e.key === "Enter" && !e.shiftKey && isComposing) {
         return;
       }
       if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "m") {
@@ -2873,7 +2871,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             }}
             onCompositionEnd={(e) => {
               isComposingRef.current = false;
-              lastCompositionEndAtRef.current = Date.now();
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
               updateSlashQuery(el.value, el.selectionStart);
