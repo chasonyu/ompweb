@@ -730,7 +730,7 @@ function AssistantMessageView({
       className="chat-message message-action-scope"
       data-actions-always-visible={actionsAlwaysVisible || undefined}
       data-live={isStreaming ? "true" : undefined}
-      style={{ marginBottom: 6 }}
+      style={{ marginBottom: showActions ? 6 : 16 }}
     >
       {modelLabelLayout ? modelLabelLayout(modelLabel) : modelLabel}
 
