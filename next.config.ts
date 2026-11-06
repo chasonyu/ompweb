@@ -94,6 +94,14 @@ const nextConfig = (phase: string): NextConfig => {
         { key: "Referrer-Policy", value: "no-referrer" },
         { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
       ];
+      const exportSecurityHeaders = securityHeaders.map((header) =>
+        header.key === "Content-Security-Policy"
+          ? {
+              ...header,
+              value: "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://stencil.so/assets/omp/ https://build.stencil.so/web/omp/18.16.0/; connect-src 'self' ws: wss:; font-src 'self' data:; media-src 'self' blob:",
+            }
+          : header,
+      );
       const globalRule = {
         // Everything except /api/files (negative lookahead, same pattern style
         // as the proxy matcher).
@@ -103,6 +111,10 @@ const nextConfig = (phase: string): NextConfig => {
       const fileRule = {
         source: "/api/files/:path*",
         headers: fileResponseHeaders,
+      };
+      const exportRule = {
+        source: "/api/sessions/:id/export",
+        headers: exportSecurityHeaders,
       };
       const rootNoCacheRule = {
         source: "/",
@@ -123,9 +135,9 @@ const nextConfig = (phase: string): NextConfig => {
 
       // Dev chunks have stable URLs whose content changes in place; caching
       // them immutably would serve stale module factories after a restart.
-      if (isDev) return [globalRule, fileRule, rootNoCacheRule];
+      if (isDev) return [globalRule, fileRule, exportRule, rootNoCacheRule];
 
-      return [globalRule, fileRule, staticImmutableRule, rootNoCacheRule];
+      return [globalRule, fileRule, exportRule, staticImmutableRule, rootNoCacheRule];
     },
     env: {
       NEXT_PUBLIC_APP_VERSION: version,
