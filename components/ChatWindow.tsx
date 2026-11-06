@@ -234,7 +234,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, reply, liv
   );
 }
 
-type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout; actionsAlwaysVisible?: boolean }) => ReactNode;
+type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout; actionsAlwaysVisible?: boolean; showActions?: boolean }) => ReactNode;
 
 /** Render a folded activity run exactly as it streamed: one entry per piece, never merged across messages. */
 export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityPiece[], renderMessage: RenderMessage): ReactNode[] {
@@ -247,6 +247,7 @@ export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityP
       messageOverride: { ...withAssistantBlocks(msg, piece.blocks, { omitUsage: true }), errorMessage: undefined },
       showTimestamp: false,
       actionsAlwaysVisible: false,
+      showActions: false,
       sourceBlockIndices: piece.blocks.map((block) => msg.content.indexOf(block)),
     });
   });
@@ -326,12 +327,27 @@ export const CommittedTranscript = memo(function CommittedTranscript({
   // omp's `branch` command accepts a user entry only; see lib/chat-fork.ts.
   const forkTargets = useMemo(() => resolveForkTargets(messages, entryIds), [messages, entryIds]);
   const lastConversationIndex = useMemo(() => messages.findLastIndex(hasConversationBody), [messages]);
+  const lastReplyIndices = useMemo(() => {
+    const indices = new Set<number>();
+    let hasLaterReply = hasStreamingReply;
+    // Keep one footer per turn, including historical turns and the flat live view.
+    for (let idx = messages.length - 1; idx >= 0; idx--) {
+      const message = messages[idx];
+      if (isGroupAnchor(message)) {
+        hasLaterReply = false;
+      } else if (message.role === "assistant" && hasConversationBody(message)) {
+        if (!hasLaterReply) indices.add(idx);
+        hasLaterReply = true;
+      }
+    }
+    return indices;
+  }, [messages, hasStreamingReply]);
 
   const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
     messageRefs.current[refIndex] = el;
   };
 
-  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout; actionsAlwaysVisible?: boolean } = {}): ReactNode => {
+  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; modelLabelLayout?: ModelLabelLayout; actionsAlwaysVisible?: boolean; showActions?: boolean } = {}): ReactNode => {
     const msg = options.messageOverride ?? messages[idx];
     const isVisible = isUserTurnMessage(msg) || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
@@ -380,6 +396,7 @@ export const CommittedTranscript = memo(function CommittedTranscript({
         sourceBlockIndices={options.sourceBlockIndices}
         modelLabelLayout={options.modelLabelLayout}
         actionsAlwaysVisible={!hasStreamingReply && idx === lastConversationIndex && (options.actionsAlwaysVisible ?? true)}
+        showActions={lastReplyIndices.has(idx) && (options.showActions ?? true)}
       />
     );
     if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
@@ -473,6 +490,7 @@ export const CommittedTranscript = memo(function CommittedTranscript({
       return (modelLabelLayout?: ModelLabelLayout) => renderMessage(segment.index, {
         attachRef, keyPrefix: `text-${segmentIdx}`, messageOverride: override,
         actionsAlwaysVisible: segmentIdx === lastTextSegmentIndex,
+        showActions: segmentIdx === lastTextSegmentIndex,
         ...(segment.last ? {} : { showTimestamp: false }), modelLabelLayout,
       });
     };

@@ -247,8 +247,41 @@ test("split replies mark only the last text segment; trailing tool results do no
   const view = render(transcript(transcriptProps(messages)));
   assert.equal(persistentActions(view.container).length, 1);
   assert.ok(persistentActions(view.container)[0].textContent.includes("last part"));
+  assert.equal(view.getByText("first part").closest(".chat-message").querySelector(".message-actions"), null);
+  assert.equal(view.container.querySelectorAll(".chat-message > .message-actions").length, 1);
   for (const button of view.container.querySelectorAll('.process-details-toggle')) fireEvent.click(button);
   assert.equal(persistentActions(view.container).length, 1);
+  assert.equal(view.container.querySelectorAll(".chat-message > .message-actions").length, 1);
+});
+
+test("intermediate replies have no footer while each turn keeps its final reply actions", () => {
+  const messages = [
+    { role: "user", content: "old prompt" },
+    assistant([text("old progress"), call("old")]),
+    assistant([text("old final")]),
+    { role: "user", content: "new prompt" },
+    assistant([text("first progress"), call("a")]),
+    assistant([text("second progress"), call("b")]),
+    assistant([text("new final")]),
+  ];
+  for (const hideToolActivity of [true, false]) {
+    const props = { ...transcriptProps(messages), hideToolActivity, sessionBusy: true };
+    props.conversationMeta.lastAnchorIdx = 3;
+    const view = render(transcript(props));
+    for (const button of view.container.querySelectorAll(".process-details-toggle")) fireEvent.click(button);
+    for (const value of ["old progress", "first progress", "second progress"]) {
+      const message = view.getByText(value).closest(".chat-message");
+      fireEvent.mouseEnter(message);
+      assert.equal(message.querySelector(".message-actions"), null, `${value} must not reserve a footer`);
+    }
+    for (const value of ["old final", "new final"]) {
+      assert.ok(view.getByText(value).closest(".chat-message").querySelector(".message-actions"));
+    }
+    assert.equal(view.container.querySelectorAll(".chat-message > .message-actions").length, 2);
+    assert.equal(persistentActions(view.container).length, 1);
+    assert.ok(persistentActions(view.container)[0].textContent.includes("new final"));
+    view.unmount();
+  }
 });
 
 test("streaming reply takes persistent actions from history, returning on commit", () => {
@@ -258,9 +291,11 @@ test("streaming reply takes persistent actions from history, returning on commit
   assert.equal(persistentActions(view.container).length, 1);
   view.rerender(transcript({ ...props, hasStreamingReply: true }));
   assert.equal(persistentActions(view.container).length, 0);
+  assert.equal(view.getByText("saved answer").closest(".chat-message").querySelector(".message-actions"), null);
   view.rerender(transcript(transcriptProps([...messages, assistant([text("committed answer")])])));
   assert.equal(persistentActions(view.container).length, 1);
   assert.ok(persistentActions(view.container)[0].textContent.includes("committed answer"));
+  assert.equal(view.container.querySelectorAll(".chat-message > .message-actions").length, 1);
 });
 
 test("live status moves to the latest process header and clears without remounting", () => {

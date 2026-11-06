@@ -154,6 +154,7 @@ function loadThinkingContent(sessionId: string, entryId: string, blockIndex: num
 
 interface Props {
   actionsAlwaysVisible?: boolean;
+  showActions?: boolean;
   /** Place the unchanged model row beside adjacent process details. */
   modelLabelLayout?: (label: ReactNode) => ReactNode;
   message: AgentMessage;
@@ -214,7 +215,7 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond, modelLabelLayout, actionsAlwaysVisible }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond, modelLabelLayout, actionsAlwaysVisible, showActions }: Props) {
   if (message.role === "custom" && isUserTurnMessage(message)) {
     const prompt: UserMessage = { role: "user", content: message.customType === "skill-prompt" ? getUserPromptText(message) ?? "/skill" : message.content, timestamp: message.timestamp };
     return <>
@@ -226,7 +227,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     return <UserMessageView actionsAlwaysVisible={actionsAlwaysVisible} message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onEdit={onEdit} editing={editing} editDisabled={editDisabled} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView actionsAlwaysVisible={actionsAlwaysVisible} message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} modelLabelLayout={modelLabelLayout} />;
+    return <AssistantMessageView actionsAlwaysVisible={actionsAlwaysVisible} showActions={showActions} message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} modelLabelLayout={modelLabelLayout} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -251,6 +252,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   return null;
 }, (prev, next) => {
   return prev.actionsAlwaysVisible === next.actionsAlwaysVisible
+    && prev.showActions === next.showActions
     && prev.modelLabelLayout === next.modelLabelLayout
     && prev.message === next.message
     && prev.isStreaming === next.isStreaming
@@ -521,6 +523,7 @@ export function isInterruptedMessage(errorMessage?: string | null, stopReason?: 
 
 function AssistantMessageView({
   actionsAlwaysVisible,
+  showActions = true,
   message,
   isStreaming,
   toolResults,
@@ -544,6 +547,7 @@ function AssistantMessageView({
   modelLabelLayout,
 }: {
   actionsAlwaysVisible?: boolean;
+  showActions?: boolean;
   modelLabelLayout?: (label: ReactNode) => ReactNode;
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -793,7 +797,7 @@ function AssistantMessageView({
         )}
       </div>
 
-      {!isStreaming && (texts.some((text) => text.trim()) || time || canFork || (ttsSupported && speakableText.trim().length > 0)) && (
+      {showActions && !isStreaming && (texts.some((text) => text.trim()) || time || canFork || (ttsSupported && speakableText.trim().length > 0)) && (
         <div className="message-actions" data-actions-active={isThisSpeaking || forking || undefined} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 6 }}>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
             <MessageCopyActions texts={texts} bodyRef={bodyRef} />
